@@ -20,7 +20,9 @@ moon update           # refresh the mooncakes registry index
 
 Pin the toolchain version you used in the repo README (e.g. record `moon version` output) so
 another agent reproduces the same behavior. There is no per-repo toolchain pin file today;
-document it in prose.
+document it in prose. The installer takes a version argument (`unix.sh <version>` or
+`MOONBIT_INSTALL_VERSION`), but the versioned download URLs returned 403 for every path
+format tried on 2026-09-14, so CI (`.github/workflows/ci.yml`) installs `latest` instead.
 
 **Version in use (2026-09-14):** `moon 0.1.20260904`, `moonc v0.10.12`, `moonbitlang/x@0.5.5`,
 `moonbitlang/async@0.21.3`. Note: `moon add` / `moon update` write to `~/.moon`, so they fail

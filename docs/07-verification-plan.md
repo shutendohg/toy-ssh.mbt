@@ -166,9 +166,12 @@ client ↔ real sshd interop is **publickey-only** (password interop is covered 
 - Everything else (OpenSSH) ships with macOS; verify with `ssh -V` and `sshd -?`/`which sshd`
   (`/usr/sbin/sshd`).
 
-## Suggested CI-ish smoke script (manual for the toy)
+## Suggested CI-ish smoke script
 
-1. `moon fmt --check && moon check` (types) → `moon test` (units + protocol).
+Steps 1–2 run in GitHub Actions (`.github/workflows/ci.yml`, ubuntu + macOS) on every push to
+`main` and every pull request. Steps 3–4 need a live `sshd` and stay manual.
+
+1. `moon fmt --check && moon check` (types) → `moon test --target native` (units + protocol).
 2. Build both binaries `--target native`.
 3. Run 3b publickey demo and assert exit code 3 + expected stdout.
 4. Run 3c publickey demo and assert `Accepted publickey` appears in the sshd log.
