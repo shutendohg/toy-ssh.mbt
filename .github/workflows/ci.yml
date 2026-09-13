@@ -1,0 +1,43 @@
+# Unit and protocol layers only (docs/07 "Suggested CI-ish smoke script" steps 1-2).
+# The OpenSSH interop steps (3-4) need a live sshd and stay manual.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The installer accepts a version argument, but the versioned download
+      # URLs could not be verified (403 on every path format tried on
+      # 2026-09-14), so this tracks `latest`. The version in use locally is
+      # recorded in docs/08 section 1; a breaking toolchain change will show
+      # up here first.
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: moon version --all
+
+      - name: Refresh registry index
+        run: moon update
+
+      - name: Format check
+        run: moon fmt --check
+
+      - name: Type check
+        run: moon check
+
+      - name: Test (native)
+        run: moon test --target native
