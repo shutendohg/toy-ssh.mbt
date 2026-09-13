@@ -27,8 +27,8 @@ Green (make it pass) → Refactor. Do not proceed to the transport layer until a
 
 - Represent byte strings as `Bytes` / `FixedArray[Byte]` / `BytesView`. Prefer `BytesView`
   for read-only spans.
-- Provide `hex_decode(String) -> Bytes` and `hex_encode(Bytes) -> String` **as test helpers**
-  so the embedded vectors below can be pasted directly into tests.
+- Use `moonbitlang/core/encoding/hex` (`@hex.decode` / `@hex.encode`, imported `for "test"`)
+  so the embedded vectors below can be pasted directly into tests. Do not hand-roll hex.
 - Little-endian vs big-endian is called out per primitive — this is where bugs hide.
 
 ---
@@ -150,9 +150,13 @@ tag:
 Montgomery-ladder scalar multiplication on Curve25519 over GF(2^255 − 19). Implement:
 
 ```moonbit
-pub fn x25519(scalar : BytesView /*32*/, u : BytesView /*32*/) -> FixedArray[Byte]  // 32
+pub fn x25519(scalar : BytesView /*32*/, u : BytesView /*32*/) -> FixedArray[Byte]?  // 32
 pub fn x25519_base(scalar : BytesView) -> FixedArray[Byte]   // u = 9
 ```
+
+`x25519` returns `None` when the peer's `u` is not 32 bytes or when the result is all-zero
+(a low-order point; RFC 7748 §6.1). The transport treats `None` as a key-exchange failure.
+The `scalar` is ours, so a wrong length there is a programmer error and aborts.
 
 Key steps (RFC 7748 §5):
 

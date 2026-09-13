@@ -1,3 +1,8 @@
 import {
   "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/utf8",
 }
+
+import {
+  "moonbitlang/core/encoding/hex",
+} for "test"

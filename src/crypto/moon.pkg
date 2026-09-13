@@ -1,3 +1,7 @@
 import {
   "moonbitlang/x/crypto" @xcrypto,
 }
+
+import {
+  "moonbitlang/core/encoding/hex",
+} for "test"

@@ -83,7 +83,8 @@ freshly generated project or `moon new`'s output before relying on it.
 Imports are referenced in code by the **last path segment as `@segment`** (e.g.
 `moonbitlang/async/socket` → `@socket`, `shutendohg/toy-ssh/wire` → `@wire`), or by the
 alias given after the import string. Blackbox tests (`*_test.mbt`) refer to their own package
-by that same `@segment` name (e.g. `@crypto.hex_decode(...)` inside `src/crypto/*_test.mbt`).
+by that same `@segment` name (e.g. `@crypto.x25519(...)` inside `src/crypto/*_test.mbt`).
+Test-only imports go in a second block: `import { "moonbitlang/core/encoding/hex" } for "test"`.
 
 ## 3. The async socket API (`moonbitlang/async`)
 
@@ -174,9 +175,13 @@ little-endian byte arrays**.
 
 - Tests are `test { ... }` blocks or `_test.mbt` files. `inspect(value, content="...")` is the
   snapshot-style assertion; `assert_eq(a, b)` for equality. Use `moon test` to run.
-- For the crypto vectors, use `@crypto.hex_encode` / `@crypto.hex_decode` (`src/crypto/hex.mbt`)
-  and assert `inspect(hex_encode(...), content="ddaf35...")` — copy the hex straight from
+- For the crypto vectors, use `@hex.encode` / `@hex.decode` from
+  `moonbitlang/core/encoding/hex` (test-only import) and assert
+  `inspect(@hex.encode(...), content="ddaf35...")` — copy the hex straight from
   [03-crypto-spec.md](03-crypto-spec.md).
+- **`test "panic ..."` is not enforced on the native target** (verified 2026-09-14: a
+  `panic`-prefixed test whose body does nothing *passes*). Do not use it to pin `abort`
+  paths; make peer-facing rejections `raise` instead and test the error value.
 - For sans-IO protocol tests, no async is needed — the state machines are synchronous, so
   those tests run on any backend. Only `net/` and the binaries require `--target native`.
 

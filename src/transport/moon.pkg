@@ -1,3 +1,8 @@
 import {
+  "moonbitlang/core/encoding/ascii",
   "shutendohg/toy-ssh/wire",
 }
+
+import {
+  "moonbitlang/core/encoding/hex",
+} for "test"

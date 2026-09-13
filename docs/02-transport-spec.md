@@ -73,8 +73,9 @@ packet_length = 1 + payload_len + pad
 > 4-byte length field from the alignment, because that field is encrypted separately. Do not
 > reuse this §2 formula there.
 
-Padding bytes SHOULD be random. Max packet size we accept: 35000 bytes of payload
-(RFC 4253 minimum guarantee is 32768 payload / 35000 total — reject larger).
+Padding bytes SHOULD be random. Max packet size we accept **or produce**: 35000 bytes in
+**total**, i.e. `4 + packet_length` (RFC 4253 §6.1 guarantees 32768 bytes of payload / 35000
+bytes total — reject anything larger, and refuse to encode it: higher layers must split).
 
 **After encryption** with `chacha20-poly1305@openssh.com`, framing changes — see §7 below.
 

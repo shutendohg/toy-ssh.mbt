@@ -4,7 +4,7 @@
 test "version_line: our banner terminated by CRLF" {
   inspect(@transport.OUR_VERSION, content="SSH-2.0-toyssh_0.1")
   inspect(
-    @wire.hex(@transport.version_line()[:]),
+    @hex.encode(@transport.version_line()[:]),
     content="5353482d322e302d746f797373685f302e310d0a",
   )
   assert_eq(@transport.version_line(), b"SSH-2.0-toyssh_0.1\r\n")
@@ -103,5 +103,20 @@ test "parse_version: rejects unsupported protocol versions" {
       )
   } noraise {
     _ => fail("expected parse_version to raise")
+  }
+}
+
+///|
+test "parse_version: rejects non-printable bytes in the identification line" {
+  for buf in [b"SSH-2.0-toy\xffssh\r\n", b"SSH-2.0-toy\x01ssh\r\n"] {
+    try @transport.parse_version(buf[:]) catch {
+      e =>
+        debug_inspect(
+          e,
+          content="ProtocolError(\"identification line is not printable ASCII\")",
+        )
+    } noraise {
+      _ => fail("expected parse_version to raise")
+    }
   }
 }

@@ -17,17 +17,17 @@ test "be_bytes_to_bigint reads big-endian" {
 ///|
 test "bigint_to_le_bytes pads to the requested length" {
   let out = @crypto.bigint_to_le_bytes(258N, 4)
-  inspect(@crypto.hex_encode(@crypto.fixed_to_bytes(out)), content="02010000")
+  inspect(@hex.encode(@crypto.fixed_to_bytes(out)), content="02010000")
   let zero = @crypto.bigint_to_le_bytes(0N, 3)
-  inspect(@crypto.hex_encode(@crypto.fixed_to_bytes(zero)), content="000000")
+  inspect(@hex.encode(@crypto.fixed_to_bytes(zero)), content="000000")
 }
 
 ///|
 test "le round trip on a 32-byte value with the high bit set" {
   let hex = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221180"
-  let n = @crypto.le_bytes_to_bigint(@crypto.hex_decode(hex))
+  let n = @crypto.le_bytes_to_bigint(@hex.decode(hex))
   let back = @crypto.bigint_to_le_bytes(n, 32)
-  inspect(@crypto.hex_encode(@crypto.fixed_to_bytes(back)), content=hex)
+  inspect(@hex.encode(@crypto.fixed_to_bytes(back)), content=hex)
 }
 
 ///|
