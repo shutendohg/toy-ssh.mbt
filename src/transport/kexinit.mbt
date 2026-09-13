@@ -1,0 +1,141 @@
+///|
+/// SSH_MSG_KEXINIT payload, RFC 4253 section 7.1 / docs/02 section 3.
+/// `encode()` yields the full payload starting at the message byte; that
+/// exact byte string is `I_C` / `I_S` in the exchange hash, so keep it.
+
+///|
+pub(all) struct KexInit {
+  cookie : Bytes
+  kex_algorithms : Array[String]
+  server_host_key_algorithms : Array[String]
+  encryption_client_to_server : Array[String]
+  encryption_server_to_client : Array[String]
+  mac_client_to_server : Array[String]
+  mac_server_to_client : Array[String]
+  compression_client_to_server : Array[String]
+  compression_server_to_client : Array[String]
+  languages_client_to_server : Array[String]
+  languages_server_to_client : Array[String]
+  first_kex_packet_follows : Bool
+  reserved : UInt
+} derive(Debug, Eq)
+
+///|
+/// Our single suite (docs/00, docs/02 section 3). The kex list carries the
+/// role-specific strict-kex marker; the MAC lists are deliberately empty
+/// because chacha20-poly1305@openssh.com is AEAD.
+pub const KEX_CURVE25519_SHA256 : String = "curve25519-sha256"
+
+///|
+pub const KEX_CURVE25519_SHA256_LIBSSH : String = "curve25519-sha256@libssh.org"
+
+///|
+pub const KEX_STRICT_CLIENT : String = "kex-strict-c-v00@openssh.com"
+
+///|
+pub const KEX_STRICT_SERVER : String = "kex-strict-s-v00@openssh.com"
+
+///|
+pub const HOSTKEY_ED25519 : String = "ssh-ed25519"
+
+///|
+pub const CIPHER_CHACHA20_POLY1305 : String = "chacha20-poly1305@openssh.com"
+
+///|
+pub const COMPRESSION_NONE : String = "none"
+
+///|
+/// The KEXINIT we advertise for `role`. `cookie` must be 16 random bytes;
+/// it is a parameter so this codec stays free of randomness.
+pub fn KexInit::for_role(role : Role, cookie~ : Bytes) -> KexInit {
+  guard cookie.length() == 16 else { abort("KEXINIT cookie must be 16 bytes") }
+  let strict = match role {
+    Client => KEX_STRICT_CLIENT
+    Server => KEX_STRICT_SERVER
+  }
+  {
+    cookie,
+    kex_algorithms: [
+      KEX_CURVE25519_SHA256,
+      KEX_CURVE25519_SHA256_LIBSSH,
+      strict,
+    ],
+    server_host_key_algorithms: [HOSTKEY_ED25519],
+    encryption_client_to_server: [CIPHER_CHACHA20_POLY1305],
+    encryption_server_to_client: [CIPHER_CHACHA20_POLY1305],
+    mac_client_to_server: [],
+    mac_server_to_client: [],
+    compression_client_to_server: [COMPRESSION_NONE],
+    compression_server_to_client: [COMPRESSION_NONE],
+    languages_client_to_server: [],
+    languages_server_to_client: [],
+    first_kex_packet_follows: false,
+    reserved: 0,
+  }
+}
+
+///|
+/// Full KEXINIT payload: message byte, cookie, ten name-lists, boolean,
+/// reserved uint32.
+pub fn KexInit::encode(self : KexInit) -> Bytes {
+  let w = @wire.Writer::new(size_hint=256)
+  w.write_byte(SSH_MSG_KEXINIT)
+  w.write_raw(self.cookie[:])
+  w.write_name_list(self.kex_algorithms)
+  w.write_name_list(self.server_host_key_algorithms)
+  w.write_name_list(self.encryption_client_to_server)
+  w.write_name_list(self.encryption_server_to_client)
+  w.write_name_list(self.mac_client_to_server)
+  w.write_name_list(self.mac_server_to_client)
+  w.write_name_list(self.compression_client_to_server)
+  w.write_name_list(self.compression_server_to_client)
+  w.write_name_list(self.languages_client_to_server)
+  w.write_name_list(self.languages_server_to_client)
+  w.write_boolean(self.first_kex_packet_follows)
+  w.write_uint32(self.reserved)
+  w.to_bytes()
+}
+
+///|
+/// Parse a KEXINIT payload (message byte through reserved uint32). The
+/// whole payload must be consumed; wire-level failures are wrapped in
+/// `ProtocolError` per docs/01.
+pub fn KexInit::decode(payload : BytesView) -> KexInit raise ProtocolError {
+  let r = @wire.Reader::new(payload)
+  let msg = r.read_byte() catch { e => raise wire_error(e) }
+  if msg != SSH_MSG_KEXINIT {
+    raise ProtocolError(
+      "KEXINIT: expected message \{SSH_MSG_KEXINIT.to_int()}, got \{msg.to_int()}",
+    )
+  }
+  let ki = read_kexinit_fields(r) catch { e => raise wire_error(e) }
+  if !r.is_at_end() {
+    raise ProtocolError("KEXINIT: \{r.remaining()} trailing byte(s)")
+  }
+  ki
+}
+
+///|
+fn wire_error(e : @wire.WireError) -> ProtocolError {
+  ProtocolError("KEXINIT: \{Repr(e)}")
+}
+
+///|
+/// Reads everything after the message byte.
+fn read_kexinit_fields(r : @wire.Reader) -> KexInit raise @wire.WireError {
+  {
+    cookie: r.read_bytes(16).to_owned(),
+    kex_algorithms: r.read_name_list(),
+    server_host_key_algorithms: r.read_name_list(),
+    encryption_client_to_server: r.read_name_list(),
+    encryption_server_to_client: r.read_name_list(),
+    mac_client_to_server: r.read_name_list(),
+    mac_server_to_client: r.read_name_list(),
+    compression_client_to_server: r.read_name_list(),
+    compression_server_to_client: r.read_name_list(),
+    languages_client_to_server: r.read_name_list(),
+    languages_server_to_client: r.read_name_list(),
+    first_kex_packet_follows: r.read_boolean(),
+    reserved: r.read_uint32(),
+  }
+}
