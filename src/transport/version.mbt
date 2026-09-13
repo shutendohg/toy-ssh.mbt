@@ -14,7 +14,7 @@ pub const MAX_VERSION_LINE : Int = 255
 /// Our version line as sent on the wire: banner + CRLF.
 pub fn version_line() -> Bytes {
   let w = @wire.Writer::new()
-  w.write_raw(ascii_bytes(OUR_VERSION)[:])
+  w.write_raw(@ascii.encode(OUR_VERSION)[:])
   w.write_raw(b"\r\n")
   w.to_bytes()
 }
@@ -34,8 +34,9 @@ pub(all) enum VersionParse {
 /// Scan `buf` for the peer's `SSH-2.0-...` line. Lines not starting with
 /// `SSH-` are skipped (servers may send a banner before the version line).
 /// Both CRLF and bare LF terminate a line; a trailing CR is stripped.
-/// Raises `ProtocolError` if any line exceeds 255 bytes or the protocol
-/// version is not 2.0.
+/// Raises `ProtocolError` if any line exceeds 255 bytes, the protocol
+/// version is not 2.0, or the identification line holds bytes outside
+/// printable US-ASCII (RFC 4253 section 4.2).
 pub fn parse_version(buf : BytesView) -> VersionParse raise ProtocolError {
   let mut line_start = 0
   for i in 0..<buf.length() {
@@ -51,9 +52,14 @@ pub fn parse_version(buf : BytesView) -> VersionParse raise ProtocolError {
     }
     let line = buf[line_start:line_end]
     if line.has_prefix(b"SSH-") {
+      for b in line {
+        if b < b'\x20' || b > b'\x7e' {
+          raise ProtocolError("identification line is not printable ASCII")
+        }
+      }
       if !line.has_prefix(b"SSH-2.0-") {
         raise ProtocolError(
-          "unsupported protocol version: " + ascii_string(line),
+          "unsupported protocol version: " + @ascii.decode_lossy(line),
         )
       }
       return Version(version=line.to_owned(), consumed=i + 1)
@@ -66,21 +72,4 @@ pub fn parse_version(buf : BytesView) -> VersionParse raise ProtocolError {
     raise ProtocolError("identification line too long")
   }
   NeedMoreData
-}
-
-///|
-/// ASCII text to bytes (one byte per char). Non-ASCII chars are a caller
-/// bug in this toy; SSH identification strings and names are ASCII.
-fn ascii_bytes(s : String) -> Bytes {
-  let chars = s.to_array()
-  Bytes::makei(chars.length(), i => chars[i].to_int().to_byte())
-}
-
-///|
-fn ascii_string(data : BytesView) -> String {
-  let sb = StringBuilder(size_hint=data.length())
-  for b in data {
-    sb.write_char(b.to_char())
-  }
-  sb.to_string()
 }

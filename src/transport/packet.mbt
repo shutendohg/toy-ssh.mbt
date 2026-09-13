@@ -3,8 +3,10 @@
 /// Only valid before NEWKEYS; the AEAD framing (docs/02 section 7) is M2.
 
 ///|
-/// Largest packet_length we accept (RFC 4253 section 6.1 minimum guarantee).
-pub const MAX_PACKET_LENGTH : Int = 35000
+/// Largest total packet size we accept or produce, counting the 4-byte
+/// `packet_length` field (RFC 4253 section 6.1: implementations must handle
+/// packets up to 35000 bytes in total; docs/02 section 2).
+pub const MAX_PACKET_TOTAL : Int = 35000
 
 ///|
 /// Alignment for the no-cipher state: max(8, block size) with no cipher.
@@ -34,8 +36,17 @@ pub fn zero_padding(n : Int) -> Bytes {
 ///|
 /// Frame `payload` as a plaintext packet. `fill(n)` must return exactly `n`
 /// padding bytes; it is a parameter so the codec stays free of randomness.
-pub fn encode_packet(payload : BytesView, fill~ : (Int) -> Bytes) -> Bytes {
+/// Raises if the framed packet would exceed `MAX_PACKET_TOTAL`: higher
+/// layers must split their data (channel window / max packet size) before
+/// it gets here.
+pub fn encode_packet(
+  payload : BytesView,
+  fill~ : (Int) -> Bytes,
+) -> Bytes raise ProtocolError {
   let pad_len = padding_length(payload.length())
+  if 4 + 1 + payload.length() + pad_len > MAX_PACKET_TOTAL {
+    raise ProtocolError("packet too large")
+  }
   let padding = fill(pad_len)
   guard padding.length() == pad_len else {
     abort("padding filler returned the wrong number of bytes")
@@ -62,18 +73,17 @@ pub(all) enum PacketParse {
 /// `ProtocolError` on framing violations (oversize, undersize, bad padding,
 /// misalignment); returns `NeedMoreData` when the packet is incomplete.
 pub fn decode_packet(buf : BytesView) -> PacketParse raise ProtocolError {
-  if buf.length() < 4 {
-    return NeedMoreData
+  // Fewer than 4 bytes buffered: the length field itself is incomplete.
+  let packet_length_u32 = @wire.Reader::new(buf).read_uint32() catch {
+    _ => return NeedMoreData
   }
-  let packet_length = (buf[0].to_int() << 24) |
-    (buf[1].to_int() << 16) |
-    (buf[2].to_int() << 8) |
-    buf[3].to_int()
   // Reject absurd lengths before waiting for more bytes, so a hostile peer
-  // cannot make us buffer without bound.
-  if packet_length < 0 || packet_length > MAX_PACKET_LENGTH {
+  // cannot make us buffer without bound. Compare as UInt so a top bit set
+  // in the length field cannot wrap into a small or negative Int.
+  if packet_length_u32 > (MAX_PACKET_TOTAL - 4).reinterpret_as_uint() {
     raise ProtocolError("packet too large")
   }
+  let packet_length = packet_length_u32.reinterpret_as_int()
   // padding_length byte + at least 4 padding bytes.
   if packet_length < 5 {
     raise ProtocolError("packet too small")

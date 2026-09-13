@@ -102,16 +102,36 @@ pub fn Writer::write_mpint(self : Writer, magnitude : BytesView) -> Unit {
 }
 
 ///|
-/// `name-list`: comma-separated ASCII names, order significant.
-pub fn Writer::write_name_list(self : Writer, names : Array[String]) -> Unit {
+/// `name-list`: comma-separated ASCII names, order significant. Each name
+/// must be non-empty printable US-ASCII without commas (RFC 4251 section
+/// 5); anything else would not round-trip through `read_name_list`.
+pub fn Writer::write_name_list(
+  self : Writer,
+  names : Array[String],
+) -> Unit raise WireError {
   let tmp = @buffer.Buffer()
   for i, name in names {
+    if name.length() == 0 {
+      raise Invalid("empty name in name-list")
+    }
+    for c in name {
+      if !is_name_char(c.to_int()) {
+        raise Invalid("name-list entry is not a printable ASCII name")
+      }
+    }
     if i > 0 {
       tmp.write_byte(b',')
     }
     tmp.write_string_utf8(name)
   }
   self.write_string(tmp.to_bytes()[:])
+}
+
+///|
+/// Printable US-ASCII excluding space and comma: what a name-list entry
+/// may contain (RFC 4251 section 5).
+fn is_name_char(c : Int) -> Bool {
+  c > 0x20 && c < 0x7f && c != ','.to_int()
 }
 
 // ---------------------------------------------------------------------------
@@ -195,10 +215,13 @@ pub fn Reader::read_string(self : Reader) -> BytesView raise WireError {
 }
 
 ///|
-/// `string` decoded as text. SSH names and messages are ASCII/UTF-8; this
-/// toy only guarantees correct results for ASCII (each byte becomes a char).
+/// `string` decoded as UTF-8 text (SSH uses this for names and messages).
+/// Malformed UTF-8 is an `Invalid` encoding, not a crash.
 pub fn Reader::read_str(self : Reader) -> String raise WireError {
-  bytes_to_ascii(self.read_string())
+  let raw = self.read_string()
+  @utf8.decode(raw) catch {
+    _ => raise Invalid("string is not valid UTF-8")
+  }
 }
 
 ///|
@@ -222,7 +245,9 @@ pub fn Reader::read_mpint(self : Reader) -> Bytes raise WireError {
 }
 
 ///|
-/// `name-list`: splits on commas. An empty string yields an empty list.
+/// `name-list`: splits on commas. An empty string yields an empty list;
+/// otherwise every name must be non-empty printable US-ASCII (RFC 4251
+/// section 5), so `",a"`, `"a,,b"` and `"a b"` are all `Invalid`.
 pub fn Reader::read_name_list(self : Reader) -> Array[String] raise WireError {
   let body = self.read_string()
   let names : Array[String] = []
@@ -230,25 +255,22 @@ pub fn Reader::read_name_list(self : Reader) -> Array[String] raise WireError {
     return names
   }
   let cur = StringBuilder()
+  fn flush() -> Unit raise WireError {
+    if cur.is_empty() {
+      raise Invalid("empty name in name-list")
+    }
+    names.push(cur.to_string())
+    cur.reset()
+  }
   for b in body {
     if b == b',' {
-      names.push(cur.to_string())
-      cur.reset()
-    } else if b < b'\x20' || b > b'\x7e' {
-      raise Invalid("non-ASCII byte in name-list")
+      flush()
+    } else if !is_name_char(b.to_int()) {
+      raise Invalid("name-list entry is not a printable ASCII name")
     } else {
       cur.write_char(b.to_char())
     }
   }
-  names.push(cur.to_string())
+  flush()
   names
-}
-
-///|
-fn bytes_to_ascii(data : BytesView) -> String {
-  let sb = StringBuilder(size_hint=data.length())
-  for b in data {
-    sb.write_char(b.to_char())
-  }
-  sb.to_string()
 }

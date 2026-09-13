@@ -77,7 +77,14 @@ pub fn KexInit::for_role(role : Role, cookie~ : Bytes) -> KexInit {
 ///|
 /// Full KEXINIT payload: message byte, cookie, ten name-lists, boolean,
 /// reserved uint32.
-pub fn KexInit::encode(self : KexInit) -> Bytes {
+pub fn KexInit::encode(self : KexInit) -> Bytes raise ProtocolError {
+  self.encode_kexinit() catch {
+    e => raise wire_error(e)
+  }
+}
+
+///|
+fn KexInit::encode_kexinit(self : KexInit) -> Bytes raise @wire.WireError {
   let w = @wire.Writer::new(size_hint=256)
   w.write_byte(SSH_MSG_KEXINIT)
   w.write_raw(self.cookie[:])

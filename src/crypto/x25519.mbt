@@ -24,22 +24,30 @@ fn decode_scalar25519(scalar : BytesView) -> BigInt {
 
 ///|
 /// Decode a 32-byte little-endian u-coordinate, ignoring the top bit
-/// (decodeUCoordinate). The result is reduced mod p.
-fn decode_u_coordinate(u : BytesView) -> BigInt {
-  guard u.length() == 32 else { abort("x25519: u must be 32 bytes") }
+/// (decodeUCoordinate). The result is reduced mod p. `u` comes from the
+/// peer, so a wrong length is not a programmer error: the caller gets
+/// `None` and treats it as a protocol failure.
+fn decode_u_coordinate(u : BytesView) -> BigInt? {
+  guard u.length() == 32 else { return None }
   let b = FixedArray::make(32, b'\x00')
   for i in 0..<32 {
     b[i] = u[i]
   }
   b[31] = b[31] & b'\x7f'
-  fe_reduce(le_bytes_to_bigint(fixed_to_bytes(b)[:]))
+  Some(fe_reduce(le_bytes_to_bigint(fixed_to_bytes(b)[:])))
 }
 
 ///|
 /// X25519(k, u): scalar multiplication with the RFC 7748 Montgomery ladder.
-pub fn x25519(scalar : BytesView, u : BytesView) -> FixedArray[Byte] {
+///
+/// `scalar` is ours (wrong length aborts). `u` is the peer's public value:
+/// returns `None` if it is not 32 bytes or if the result is all-zero, which
+/// happens exactly when `u` is a low-order point (RFC 7748 section 6.1:
+/// "implementations SHOULD abort" in that case, since the shared secret
+/// would be predictable).
+pub fn x25519(scalar : BytesView, u : BytesView) -> FixedArray[Byte]? {
   let k = decode_scalar25519(scalar)
-  let x_1 = decode_u_coordinate(u)
+  guard decode_u_coordinate(u) is Some(x_1) else { return None }
   let mut x_2 = 1N
   let mut z_2 = 0N
   let mut x_3 = x_1
@@ -79,13 +87,26 @@ pub fn x25519(scalar : BytesView, u : BytesView) -> FixedArray[Byte] {
     z_2 = z_3
     z_3 = tz
   }
-  bigint_to_le_bytes(fe_mul(x_2, fe_inv(z_2)), 32)
+  let out = bigint_to_le_bytes(fe_mul(x_2, fe_inv(z_2)), 32)
+  let mut acc = b'\x00'
+  for b in out {
+    acc = acc | b
+  }
+  if acc == b'\x00' {
+    return None
+  }
+  Some(out)
 }
 
 ///|
-/// X25519 against the base point u = 9 (public-key derivation).
+/// X25519 against the base point u = 9 (public-key derivation). The base
+/// point has prime order and the clamped scalar is nonzero, so this never
+/// yields the all-zero output.
 pub fn x25519_base(scalar : BytesView) -> FixedArray[Byte] {
   let base = FixedArray::make(32, b'\x00')
   base[0] = b'\x09'
-  x25519(scalar, fixed_to_bytes(base)[:])
+  match x25519(scalar, fixed_to_bytes(base)[:]) {
+    Some(out) => out
+    None => abort("x25519: base point multiplication produced zero")
+  }
 }

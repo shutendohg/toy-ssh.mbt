@@ -14,8 +14,8 @@ A change isn't "done" for its milestone until the relevant layer passes (see
 ## Layer 1 — Unit tests (`moon test`)
 
 - Every crypto primitive asserts the **exact hex vectors** embedded in
-  [03-crypto-spec.md](03-crypto-spec.md). Paste the hex directly; provide `hex_decode` test
-  helpers.
+  [03-crypto-spec.md](03-crypto-spec.md). Paste the hex directly; decode with
+  `moonbitlang/core/encoding/hex` imported `for "test"`.
 - `wire/` codec: byte-exact fixtures for each type, especially `mpint` edge cases and
   name-list ordering.
 - Transport: padding math, KEXINIT round-trip, key-derivation against a pinned fixture,
