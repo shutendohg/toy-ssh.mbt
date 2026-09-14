@@ -211,8 +211,15 @@ Curve25519), using SHA-512. Implement sign, verify, and public-key derivation:
 
 ```moonbit
 pub fn ed25519_public_key(secret : BytesView /*32*/) -> FixedArray[Byte]        // 32-byte A
-pub fn ed25519_sign(secret : BytesView /*32*/, msg : BytesView) -> FixedArray[Byte]  // 64
 pub fn ed25519_verify(public : BytesView /*32*/, msg : BytesView, sig : BytesView /*64*/) -> Bool
+
+// Signing goes through a key pair, which caches the SHA-512 expansion and the
+// encoded public key A. Deriving A costs a scalar multiplication, so signing
+// from a bare seed would pay for it on every signature.
+pub fn Ed25519KeyPair::from_seed(seed : BytesView /*32*/) -> Ed25519KeyPair
+pub fn Ed25519KeyPair::public(self) -> Bytes      // 32-byte A
+pub fn Ed25519KeyPair::seed(self) -> Bytes        // the 32-byte seed
+pub fn Ed25519KeyPair::sign(self, msg : BytesView) -> FixedArray[Byte]   // 64
 ```
 
 Algorithm (RFC 8032 §5.1), all little-endian, curve constant `d = -121665/121666`,
@@ -270,8 +277,9 @@ message   ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a219299
 signature dc2a4459e7369633a52b1bf277839a00201009a3efbf3ecb69bea2186c26b58909351fc9ac90b3ecfdfbc7c66431e0303dca179c138ac17ad9bef1177331a704
 ```
 
-For each: assert `ed25519_public_key(secret) == public`, `ed25519_sign(secret, message) ==
-signature`, and `ed25519_verify(public, message, signature) == true`. Add a negative test:
+For each: assert `ed25519_public_key(secret) == public`,
+`Ed25519KeyPair::from_seed(secret).sign(message) == signature`, and
+`ed25519_verify(public, message, signature) == true`. Add a negative test:
 flip one bit of the signature or message and assert verify returns `false`.
 
 ---
@@ -280,7 +288,7 @@ flip one bit of the signature or message and assert verify returns `false`.
 
 - Kex uses `x25519` / `x25519_base` (§4), `sha256` (reused), and the `mpint` encoder from
   `wire/`.
-- Host-key signing/verification uses `ed25519_sign` / `ed25519_verify` (§5).
+- Host-key signing/verification uses `Ed25519KeyPair::sign` / `ed25519_verify` (§5).
 - The record cipher uses `ChaCha20` (§2) + `poly1305` (§3).
 - `keys/` uses `ed25519_public_key` to check that a parsed private key matches its public
   half.

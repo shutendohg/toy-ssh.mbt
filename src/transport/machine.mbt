@@ -80,6 +80,8 @@ fn protocol_error(e : ProtocolError) -> Fatal {
 ///|
 pub struct Transport {
   cfg : TransportConfig
+  /// Server: the expanded host key. Client: `None`.
+  host_key : @crypto.Ed25519KeyPair?
   mut state : State
   mut inbuf : Bytes
   outbuf : @buffer.Buffer
@@ -108,9 +110,19 @@ pub fn Transport::new(cfg : TransportConfig) -> Transport {
   guard cfg.ephemeral_scalar.length() == 32 else {
     abort("Transport: ephemeral scalar must be 32 bytes")
   }
-  if cfg.role == Server {
-    guard cfg.host_seed is Some(seed) && seed.length() == 32 else {
-      abort("Transport: server needs a 32-byte host key seed")
+  // Expand the host key once instead of on every signature.
+  let host_key = match cfg.host_seed {
+    Some(seed) => {
+      guard seed.length() == 32 else {
+        abort("Transport: host key seed must be 32 bytes")
+      }
+      Some(@crypto.Ed25519KeyPair::from_seed(seed[:]))
+    }
+    None => {
+      guard cfg.role == Client else {
+        abort("Transport: server needs a host key seed")
+      }
+      None
     }
   }
   let our_kexinit = KexInit::for_role(cfg.role, cookie=cfg.cookie)
@@ -119,6 +131,7 @@ pub fn Transport::new(cfg : TransportConfig) -> Transport {
   }
   let t = {
     cfg,
+    host_key,
     state: VersionWait,
     inbuf: b"",
     outbuf: @buffer.Buffer(size_hint=1024),
@@ -390,12 +403,10 @@ fn Transport::on_ecdh_init(
   let q_s = ecdh_public(self.cfg.ephemeral_scalar[:])
   let k_raw = shared_secret(self.cfg.ephemeral_scalar[:], init.q_c[:])
   let k_mpint = shared_secret_mpint(k_raw[:])
-  guard self.cfg.host_seed is Some(seed) else {
-    abort("server without host seed")
+  guard self.host_key is Some(host_key) else {
+    abort("server without host key")
   }
-  let k_s = encode_ed25519_host_key(
-    @crypto.fixed_to_bytes(@crypto.ed25519_public_key(seed[:])),
-  )
+  let k_s = encode_ed25519_host_key(host_key.public()[:])
   let h = exchange_hash(
     v_c=self.peer_version,
     v_s=@ascii.encode(OUR_VERSION),
@@ -409,7 +420,7 @@ fn Transport::on_ecdh_init(
   let reply : KexEcdhReply = {
     k_s,
     q_s,
-    signature: sign_exchange_hash(seed[:], h[:]),
+    signature: sign_exchange_hash(host_key, h[:]),
   }
   self.send_plain(reply.encode())
   self.finish_kex(k_mpint, h)

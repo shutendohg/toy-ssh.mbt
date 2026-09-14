@@ -454,7 +454,10 @@ fn dance(i_c : Bytes, i_s : Bytes) -> (Bytes, Bytes, Bytes, Bytes) raise {
     q_s~,
     k_mpint=k_srv,
   )
-  let signature = @transport.sign_exchange_hash(host_seed[:], h_srv[:])
+  let signature = @transport.sign_exchange_hash(
+    @crypto.Ed25519KeyPair::from_seed(host_seed[:]),
+    h_srv[:],
+  )
   let reply_payload = ({ k_s, q_s, signature, } : @transport.KexEcdhReply).encode()
 
   // Client: receives the reply, computes K and H, verifies.

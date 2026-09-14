@@ -166,13 +166,66 @@ pub fn ed25519_public_key(secret : BytesView) -> FixedArray[Byte] {
 }
 
 ///|
-/// Sign `msg` with the 32-byte seed; returns R (32) || S (32, LE).
-pub fn ed25519_sign(secret : BytesView, msg : BytesView) -> FixedArray[Byte] {
-  let (s, prefix) = ed_expand_secret(secret)
-  let a_enc = fixed_to_bytes(ed_encode(ed_scalar_mul(s, ed_base)))
-  let r = ed_hash_mod_l([prefix[:], msg])
+/// A signing key with its expansion cached: the clamped scalar, the SHA-512
+/// prefix and the encoded public key A. Deriving A costs a scalar
+/// multiplication, so signing from a bare seed would pay for it on every
+/// signature; hold a key pair instead when you sign more than once.
+///
+/// Fields are private: build one with `from_seed`, read `seed()` and
+/// `public()`.
+pub struct Ed25519KeyPair {
+  scalar : BigInt
+  prefix : Bytes
+  public : Bytes
+  seed : Bytes
+}
+
+///|
+/// Expand a 32-byte seed. A wrong length is a programmer error (the key is
+/// ours) and aborts; key files are validated by `keys/` before they get
+/// here.
+pub fn Ed25519KeyPair::from_seed(seed : BytesView) -> Ed25519KeyPair {
+  let (scalar, prefix) = ed_expand_secret(seed)
+  {
+    scalar,
+    prefix,
+    public: fixed_to_bytes(ed_encode(ed_scalar_mul(scalar, ed_base))),
+    seed: seed.to_owned(),
+  }
+}
+
+///|
+/// The 32-byte public key A.
+pub fn Ed25519KeyPair::public(self : Ed25519KeyPair) -> Bytes {
+  self.public
+}
+
+///|
+/// The 32-byte seed this pair was built from (RFC 8032's "secret key").
+pub fn Ed25519KeyPair::seed(self : Ed25519KeyPair) -> Bytes {
+  self.seed
+}
+
+///|
+/// Sign `msg`; returns R (32) || S (32, LE).
+pub fn Ed25519KeyPair::sign(
+  self : Ed25519KeyPair,
+  msg : BytesView,
+) -> FixedArray[Byte] {
+  ed25519_sign_expanded(self.scalar, self.prefix[:], self.public[:], msg)
+}
+
+///|
+/// The RFC 8032 section 5.1.6 signing steps, given an already expanded key.
+fn ed25519_sign_expanded(
+  s : BigInt,
+  prefix : BytesView,
+  a_enc : BytesView,
+  msg : BytesView,
+) -> FixedArray[Byte] {
+  let r = ed_hash_mod_l([prefix, msg])
   let r_enc = fixed_to_bytes(ed_encode(ed_scalar_mul(r, ed_base)))
-  let k = ed_hash_mod_l([r_enc[:], a_enc[:], msg])
+  let k = ed_hash_mod_l([r_enc[:], a_enc, msg])
   let big_s = (r + k * s) % ed25519_l
   let out = FixedArray::make(64, b'\x00')
   out.blit_from_bytes(0, r_enc, 0, 32)

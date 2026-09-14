@@ -359,10 +359,13 @@ pub fn exchange_hash(
 }
 
 ///|
-/// Server side: sign the 32-byte exchange hash with the Ed25519 host seed
+/// Server side: sign the 32-byte exchange hash with the Ed25519 host key
 /// and return the `ssh-ed25519` signature blob.
-pub fn sign_exchange_hash(host_seed : BytesView, h : BytesView) -> Bytes {
-  let sig = @crypto.fixed_to_bytes(@crypto.ed25519_sign(host_seed, h))
+pub fn sign_exchange_hash(
+  host_key : @crypto.Ed25519KeyPair,
+  h : BytesView,
+) -> Bytes {
+  let sig = @crypto.fixed_to_bytes(host_key.sign(h))
   encode_ed25519_signature(sig[:])
 }
 
