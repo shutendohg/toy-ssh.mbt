@@ -2,6 +2,7 @@ import {
   "moonbitlang/async/fs",
   "moonbitlang/core/encoding/ascii",
   "moonbitlang/async/socket",
+  "moonbitlang/async/stdio",
   "moonbitlang/core/random",
   "shutendohg/toy-ssh/transport",
 }

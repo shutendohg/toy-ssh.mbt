@@ -1,9 +1,11 @@
 import {
   "moonbitlang/async",
   "moonbitlang/async/socket",
-  "moonbitlang/core/env",
   "moonbitlang/core/encoding/hex",
+  "moonbitlang/core/env",
   "moonbitlang/x/sys",
+  "shutendohg/toy-ssh/auth",
+  "shutendohg/toy-ssh/keys",
   "shutendohg/toy-ssh/net",
   "shutendohg/toy-ssh/transport",
 }

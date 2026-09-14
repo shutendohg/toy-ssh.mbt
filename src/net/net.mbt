@@ -16,6 +16,17 @@ pub async fn random_bytes(n : Int) -> Bytes {
 }
 
 ///|
+/// Write one diagnostic line to standard error, immediately.
+///
+/// `println` goes through C stdio, which is fully buffered when standard
+/// output is a file or a pipe: a long-running server would show nothing
+/// until it exited. Diagnostics also belong on standard error so that a
+/// remote command's output can own standard output verbatim.
+pub async fn log(line : String) -> Unit {
+  @stdio.stderr.write(@ascii.encode(line + "\n"))
+}
+
+///|
 /// Whole-file text read. Key files, `authorized_keys` and `known_hosts`
 /// are all small enough to slurp; the parsers in `keys/` work on the text.
 pub async fn read_text_file(path : String) -> String {
@@ -88,7 +99,7 @@ pub async fn server_config(host_seed~ : Bytes) -> @transport.TransportConfig {
 pub async fn run(
   conn : @socket.Tcp,
   t : @transport.Transport,
-  on_event : (@transport.Transport, @transport.TransportEvent) -> Unit,
+  on_event : async (@transport.Transport, @transport.TransportEvent) -> Unit,
 ) -> Unit {
   let buf = FixedArray::make(16384, b'\x00')
   flush(conn, t)

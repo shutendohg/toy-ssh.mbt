@@ -79,11 +79,38 @@ Start the toy server (tmux, detached) listening on e.g. `127.0.0.1:2222`, host k
 `host_ed25519`, with `client_ed25519.pub` in the user's `authorized_keys`, and a password
 entry for password tests.
 
-> Until M3 lands key-file parsing, the M2 server takes its host key as a raw 32-byte seed:
-> `server --listen 127.0.0.1:2222 --host-seed-hex <64 hex>`. **Pin the seed across runs**
-> (keep it in `interop/toy_host_seed.hex`); a fresh random seed per start makes `ssh` reject
-> the second connection with "REMOTE HOST IDENTIFICATION HAS CHANGED" because
-> `accept-new` already recorded the first key in `interop/known_hosts`.
+Since M3 the server loads an `openssh-key-v1` file, so the host key is stable across runs:
+
+```
+server --listen 127.0.0.1:2222 \
+       --host-key ./interop/host_ed25519 \
+       --authorized-keys ./interop/toy_authorized_keys \
+       --passwords ./interop/toy_passwords
+```
+
+`--authorized-keys` takes a `.pub`/`authorized_keys` file (`cp client_ed25519.pub
+toy_authorized_keys`), and `--passwords` takes plaintext `user:password` lines
+(`user:hunter2`) — insecure by construction, toy only. `--host-seed-hex <64 hex>` still
+exists as an alternative to a key file; with it, **pin the seed across runs**, because a
+fresh random seed per start makes `ssh` reject the second connection with "REMOTE HOST
+IDENTIFICATION HAS CHANGED" once `accept-new` has recorded the first key.
+
+Server diagnostics go to **standard error**, unbuffered, so `2>&1` into a log file shows
+progress while the server is still running (`println` is fully buffered to a file and would
+show nothing until exit).
+
+Driving the password prompt without a TTY: OpenSSH reads the password from `SSH_ASKPASS`
+when `SSH_ASKPASS_REQUIRE=force` and `DISPLAY` are set, which avoids needing tmux for the
+password case:
+
+```
+printf '#!/bin/sh\necho hunter2\n' > interop/askpass.sh && chmod +x interop/askpass.sh
+SSH_ASKPASS=$PWD/interop/askpass.sh SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+  ssh -T -p 2222 -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+      -o NumberOfPasswordPrompts=1 \
+      -o UserKnownHostsFile=./interop/known_hosts -o StrictHostKeyChecking=accept-new \
+      user@127.0.0.1 true
+```
 
 Publickey:
 ```
@@ -137,10 +164,16 @@ required):
 ```
 `-ddd` keeps it in the foreground, single-connection, very verbose. Then the toy client:
 ```
-toyssh -vvv -i ./interop/client_ed25519 \
+client -i ./interop/client_ed25519 \
     --known-hosts ./interop/toy_known_hosts \
-    -p 2200 $(whoami)@127.0.0.1 'uname -a'
+    -p 2200 $(whoami)@127.0.0.1            # 'uname -a' is M4
 ```
+
+The client trusts an unknown host key on first use and appends it to the known_hosts file
+(insecure; `--strict-host-key-checking` refuses instead). A **changed** host key is always
+refused, printing both fingerprints. Verified by hand at M3: first connection records the
+key, the second reports it matches, and rewriting the stored key makes the client refuse
+with exit status 1.
 Expected: `sshd -ddd` logs `Accepted publickey for ...`, the command runs, output returns,
 exit code propagates. **Note:** unprivileged `sshd` can't switch users, so log in as
 **your own** username (`$(whoami)`), and it can't do system password auth — that's why toy
