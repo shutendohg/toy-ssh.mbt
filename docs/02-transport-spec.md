@@ -96,7 +96,7 @@ name-list    compression_algorithms_client_to_server
 name-list    compression_algorithms_server_to_client
 name-list    languages_client_to_server        # empty
 name-list    languages_server_to_client        # empty
-boolean      first_kex_packet_follows           # false for us
+boolean      first_kex_packet_follows           # false for us; if the peer sets it, disconnect (we never accept a guess)
 uint32       0  (reserved)
 ```
 
@@ -239,6 +239,8 @@ Let `HASH = SHA-256`, `K` = shared secret as `mpint`, `H` = exchange hash, `sess
 For each key, letter `X` is a single ASCII char:
 
 ```
+# K here is the FULL wire mpint of the shared secret, i.e. including its
+# 4-byte length prefix (RFC 4253 §7.2 "K is encoded as mpint"). Same in H.
 K1 = HASH(K || H || X || session_id)
 K2 = HASH(K || H || K1)
 K3 = HASH(K || H || K1 || K2)
@@ -330,7 +332,10 @@ Given `payload` and current send `seqnum`:
 ### Receiving a packet
 
 1. Read 4 bytes. Decrypt with `ChaCha20(K_1, nonce, counter=0)` to get `packet_length`.
-   Sanity-check the length (≤ 35000, and `enc_body` length = `packet_length`); abort if absurd.
+   Sanity-check the length (`4 + packet_length ≤ 35000` — the 16-byte tag is not counted —
+   and `packet_length ≥ 5`, multiple of 8); abort if absurd. Note that a wrong key or nonce
+   normally surfaces **here** as a bad length, not later as a tag mismatch (OpenSSH prints
+   "Bad packet length" in that situation, not "Corrupted MAC").
 2. Read `packet_length + 16` more bytes (`enc_body || tag`).
 3. Recompute `poly_key` = first 32 bytes of `ChaCha20(K_2, nonce, counter=0)`.
 4. Verify `tag == Poly1305(poly_key, enc_len || enc_body)`. **On mismatch, abort the

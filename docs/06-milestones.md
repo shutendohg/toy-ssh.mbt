@@ -66,6 +66,10 @@ plumbing lands in M2 (record layer), not here.
 
 ## M2 — Key exchange & encrypted transport
 
+**Status: done (2026-09-14).** Acceptance 1–3 verified: in-memory self-interop (identical
+`session_id`, encrypted traffic both ways), pinned `H` fixture, and OpenSSH_10.2p1 interop in
+both directions up to `SSH2_MSG_SERVICE_ACCEPT` with strict KEX ordering.
+
 **Deliverable:** full `curve25519-sha256` kex, key derivation, NEWKEYS, strict-kex, and the
 `chacha20-poly1305@openssh.com` record layer. Transport reaches "Established" and can send/
 receive encrypted packets. `net/` async adapter added so the binaries can actually connect.
