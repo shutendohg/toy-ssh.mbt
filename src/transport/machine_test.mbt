@@ -501,3 +501,55 @@ test "fuzz: garbage never crashes, always ends in a Disconnect" {
     assert_true(saw_disconnect || !s.is_closed())
   }
 }
+
+///|
+test "disconnect: strict kex requires KEXINIT to be the peer's first packet" {
+  let s = @transport.Transport::new(server_config())
+  ignore(s.take_outgoing())
+  let bytes = @transport.version_line() +
+    @transport.encode_packet(
+      b"\x02\x00\x00\x00\x00"[:],
+      fill=@transport.zero_padding,
+    ) +
+    @transport.encode_packet(
+      @transport.KexInit::for_role(Client, cookie=Bytes::make(16, b'\x33')).encode()[:],
+      fill=@transport.zero_padding,
+    )
+  let desc = expect_disconnect(
+    s,
+    bytes,
+    @transport.SSH_DISCONNECT_PROTOCOL_ERROR,
+  )
+  inspect(desc, content="KEXINIT was not the first packet")
+}
+
+///|
+test "non-strict peer: IGNORE before KEXINIT is tolerated" {
+  let s = @transport.Transport::new(server_config())
+  ignore(s.take_outgoing())
+  let peer_ki = {
+    ..@transport.KexInit::for_role(Client, cookie=Bytes::make(16, b'\x33')),
+    kex_algorithms: ["curve25519-sha256"],
+  }
+  let bytes = @transport.version_line() +
+    @transport.encode_packet(
+      b"\x02\x00\x00\x00\x00"[:],
+      fill=@transport.zero_padding,
+    ) +
+    @transport.encode_packet(peer_ki.encode()[:], fill=@transport.zero_padding)
+  assert_eq(s.on_received(bytes[:]).length(), 0)
+  assert_false(s.is_closed())
+  assert_false(s.strict_kex())
+}
+
+///|
+test "send_packet and disconnect after close are no-ops" {
+  let c = @transport.Transport::new(client_config())
+  let s = @transport.Transport::new(server_config())
+  ignore(pump(c, s))
+  c.disconnect(@transport.SSH_DISCONNECT_BY_APPLICATION, "bye")
+  ignore(c.take_outgoing())
+  c.send_packet(b"\x05\x00\x00\x00\x00"[:])
+  c.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, "again")
+  assert_eq(c.take_outgoing().length(), 0)
+}

@@ -11,13 +11,17 @@
 /// Toy code. Never use for real security.
 
 ///|
-async fn main raise {
+async fn main {
   let args = @env.args()
   let mut target = "127.0.0.1:2222"
   let mut i = 1
   while i < args.length() {
     match args[i] {
       "--connect" => {
+        guard i + 1 < args.length() else {
+          println("--connect needs a value")
+          @sys.exit(2)
+        }
         target = args[i + 1]
         i = i + 2
       }
@@ -33,31 +37,47 @@ async fn main raise {
   println("toy-ssh client: connected to \{addr}")
   let mut exit_code = 1
   let cfg = @net.client_config(accept_host_key=k_s => {
-    println("toy-ssh client: server host key blob \{@hex.encode(k_s[:])} (accepted: M2 has no known_hosts)")
+    println(
+      "toy-ssh client: server host key blob \{@hex.encode(k_s[:])} (accepted: M2 has no known_hosts)",
+    )
     true
   })
   let t = @transport.Transport::new(cfg)
-  @net.run(conn, t, (t, ev) => match ev {
-    Established(session_id~) => {
-      println("toy-ssh client: established, session id \{@hex.encode(session_id[:])}")
-      t.send_packet(
-        @transport.encode_service_request(@transport.SERVICE_USERAUTH)[:],
-      )
-    }
-    Packet(payload~) => {
-      let service = @transport.decode_service_accept(payload[:]) catch {
-        _ => {
-          println("toy-ssh client: unexpected message \{payload[0].to_int()}")
-          t.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, "unexpected message")
-          return
-        }
+  @net.run(conn, t, (t, ev) => {
+    match ev {
+      Established(session_id~) => {
+        println(
+          "toy-ssh client: established, session id \{@hex.encode(session_id[:])}",
+        )
+        t.send_packet(
+          @transport.encode_service_request(@transport.SERVICE_USERAUTH)[:],
+        )
       }
-      println("toy-ssh client: SERVICE_ACCEPT \{service}; userauth is M3, done")
-      exit_code = 0
-      t.disconnect(@transport.SSH_DISCONNECT_BY_APPLICATION, "toy-ssh M2 demo complete")
+      Packet(payload~) => {
+        let service = @transport.decode_service_accept(payload[:]) catch {
+          _ => {
+            println("toy-ssh client: unexpected message \{payload[0].to_int()}")
+            t.disconnect(
+              @transport.SSH_DISCONNECT_PROTOCOL_ERROR,
+              "unexpected message",
+            )
+            return
+          }
+        }
+        println(
+          "toy-ssh client: SERVICE_ACCEPT \{service}; userauth is M3, done",
+        )
+        exit_code = 0
+        t.disconnect(
+          @transport.SSH_DISCONNECT_BY_APPLICATION,
+          "toy-ssh M2 demo complete",
+        )
+      }
+      Disconnect(code~, description~, by_peer~) =>
+        println(
+          "toy-ssh client: disconnect code=\{code} \"\{description}\" by_peer=\{by_peer}",
+        )
     }
-    Disconnect(code~, description~, by_peer~) =>
-      println("toy-ssh client: disconnect code=\{code} \"\{description}\" by_peer=\{by_peer}")
   })
   @sys.exit(exit_code)
 }

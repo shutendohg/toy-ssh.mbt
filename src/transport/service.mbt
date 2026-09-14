@@ -80,9 +80,7 @@ fn decode_service(
   name : String,
 ) -> String raise ProtocolError {
   let r = expect_message(payload, msg, name)
-  let service = r.read_str() catch {
-    e => raise ProtocolError("\{name}: \{Repr(e)}")
-  }
+  let service = r.read_str() catch { e => raise wire_error(name, e) }
   expect_end(r, name)
   service
 }

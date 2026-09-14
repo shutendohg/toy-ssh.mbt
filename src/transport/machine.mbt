@@ -63,6 +63,9 @@ priv suberror Fatal {
 }
 
 ///|
+const KEXINIT_NOT_FIRST : String = "KEXINIT was not the first packet"
+
+///|
 fn kex_failed(e : ProtocolError) -> Fatal {
   let ProtocolError(description) = e
   Fatal(code=SSH_DISCONNECT_KEY_EXCHANGE_FAILED, description~)
@@ -172,9 +175,13 @@ pub fn Transport::strict_kex(self : Transport) -> Bool {
 }
 
 ///|
-/// Queue a next-layer payload, encrypted. Only valid once established;
-/// calling it earlier is a programmer error.
+/// Queue a next-layer payload, encrypted. Calling it before `Established`
+/// is a programmer error; calling it after the connection closed is
+/// ignored, so event handlers need not track the close themselves.
 pub fn Transport::send_packet(self : Transport, payload : BytesView) -> Unit {
+  if self.state == Closed {
+    return
+  }
   guard self.state == Established else {
     abort("Transport::send_packet before Established")
   }
@@ -248,9 +255,9 @@ fn Transport::drive(
       Some(rec) =>
         rec.open_next(self.inbuf[:]) catch {
           ProtocolError(description) => {
-            // The record layer reports a bad tag with this prefix; every
-            // other failure there is a framing error.
-            let code = if description.has_prefix("MAC/tag") {
+            // Exactly one record-layer failure is a MAC error; the rest are
+            // framing errors.
+            let code = if description == MAC_FAILURE {
               SSH_DISCONNECT_MAC_ERROR
             } else {
               SSH_DISCONNECT_PROTOCOL_ERROR
@@ -318,7 +325,12 @@ fn Transport::handle_payload(
     return
   }
   match self.state {
-    KexInitWait => self.on_kexinit(payload) catch { e => raise kex_failed(e) }
+    KexInitWait =>
+      self.on_kexinit(payload) catch {
+        ProtocolError(d) as e if d == KEXINIT_NOT_FIRST =>
+          raise protocol_error(e)
+        e => raise kex_failed(e)
+      }
     KexWait =>
       try {
         match self.cfg.role {
@@ -352,6 +364,12 @@ fn Transport::on_kexinit(
 ) -> Unit raise ProtocolError {
   let peer = KexInit::decode(payload[:])
   let negotiated = negotiate(self.cfg.role, self.our_kexinit, peer)
+  // Under strict kex the peer's KEXINIT must be its very first packet
+  // (docs/02 section 3). We only learn "strict" now, so check the count
+  // of plaintext packets received so far (this one included).
+  if negotiated.strict_kex && self.plain_recv_seq != 1 {
+    raise ProtocolError(KEXINIT_NOT_FIRST)
+  }
   self.peer_kexinit = Some(peer)
   self.peer_kexinit_payload = payload
   self.negotiated = Some(negotiated)

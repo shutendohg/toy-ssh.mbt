@@ -79,6 +79,12 @@ Start the toy server (tmux, detached) listening on e.g. `127.0.0.1:2222`, host k
 `host_ed25519`, with `client_ed25519.pub` in the user's `authorized_keys`, and a password
 entry for password tests.
 
+> Until M3 lands key-file parsing, the M2 server takes its host key as a raw 32-byte seed:
+> `server --listen 127.0.0.1:2222 --host-seed-hex <64 hex>`. **Pin the seed across runs**
+> (keep it in `interop/toy_host_seed.hex`); a fresh random seed per start makes `ssh` reject
+> the second connection with "REMOTE HOST IDENTIFICATION HAS CHANGED" because
+> `accept-new` already recorded the first key in `interop/known_hosts`.
+
 Publickey:
 ```
 ssh -vvv -T -p 2222 \

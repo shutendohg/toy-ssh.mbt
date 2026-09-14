@@ -75,6 +75,11 @@ pub async fn run(
     let chunk = Bytes::makei(n, i => buf[i])
     for ev in t.on_received(chunk[:]) {
       on_event(t, ev)
+      // A handler may have closed the transport; the rest of the batch is
+      // moot then (the transport itself already stopped producing events).
+      if t.is_closed() && !(ev is Disconnect(..)) {
+        break
+      }
     }
     flush(conn, t)
   }

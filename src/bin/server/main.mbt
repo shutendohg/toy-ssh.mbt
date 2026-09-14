@@ -8,7 +8,7 @@
 /// Toy code. Never use for real security.
 
 ///|
-async fn main raise {
+async fn main {
   let args = @env.args()
   let mut listen = "127.0.0.1:2222"
   let mut seed_hex : String? = None
@@ -16,10 +16,18 @@ async fn main raise {
   while i < args.length() {
     match args[i] {
       "--listen" => {
+        guard i + 1 < args.length() else {
+          println("--listen needs a value")
+          @sys.exit(2)
+        }
         listen = args[i + 1]
         i = i + 2
       }
       "--host-seed-hex" => {
+        guard i + 1 < args.length() else {
+          println("--host-seed-hex needs a value")
+          @sys.exit(2)
+        }
         seed_hex = Some(args[i + 1])
         i = i + 2
       }
@@ -43,19 +51,25 @@ async fn main raise {
   println("toy-ssh server: host key seed \{@hex.encode(seed[:])}")
   let server = @socket.TcpServer(@socket.Addr::parse(listen), reuse_addr=true)
   println("toy-ssh server: listening on \{server.addr}")
-  server.run_forever(allow_failure=true) <| (conn, peer) => {
+  server.run_forever(allow_failure=true) <| ((conn, peer) => {
     defer conn.close()
     println("[\{peer}] connected")
     let t = @transport.Transport::new(@net.server_config(host_seed=seed))
-    @net.run(conn, t, (t, ev) => match ev {
-      Established(session_id~) =>
-        println("[\{peer}] established, session id \{@hex.encode(session_id[:])}")
-      Packet(payload~) => handle_packet(t, peer, payload)
-      Disconnect(code~, description~, by_peer~) =>
-        println("[\{peer}] disconnect code=\{code} \"\{description}\" by_peer=\{by_peer}")
+    @net.run(conn, t, (t, ev) => {
+      match ev {
+        Established(session_id~) =>
+          println(
+            "[\{peer}] established, session id \{@hex.encode(session_id[:])}",
+          )
+        Packet(payload~) => handle_packet(t, peer, payload)
+        Disconnect(code~, description~, by_peer~) =>
+          println(
+            "[\{peer}] disconnect code=\{code} \"\{description}\" by_peer=\{by_peer}",
+          )
+      }
     })
     println("[\{peer}] closed")
-  }
+  })
 }
 
 ///|
@@ -82,7 +96,9 @@ fn handle_packet(
       return
     }
   }
-  println("[\{peer}] message \{payload[0].to_int()} after kex: userauth is M3, disconnecting")
+  println(
+    "[\{peer}] message \{payload[0].to_int()} after kex: userauth is M3, disconnecting",
+  )
   t.disconnect(
     @transport.SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
     "toy-ssh: user authentication is not implemented yet (M3)",

@@ -11,6 +11,12 @@
 /// Toy code. Never use for real security.
 
 ///|
+/// The exact `ProtocolError` text raised when the Poly1305 tag does not
+/// verify. The transport maps this one message to SSH_DISCONNECT_MAC_ERROR,
+/// so it is a constant rather than free text.
+pub const MAC_FAILURE : String = "MAC/tag verification failed"
+
+///|
 /// Alignment of the encrypted body: `1 + payload + padding` is a multiple
 /// of 8 (the length field is excluded because it is encrypted separately).
 const AEAD_ALIGN : Int = 8
@@ -199,7 +205,7 @@ pub fn open_packet(
   let pk = poly_key(key, nonce)
   let want = @crypto.poly1305(pk[:], buf[0:4 + packet_length])
   if !tags_equal(@crypto.fixed_to_bytes(want)[:], buf[4 + packet_length:total]) {
-    raise ProtocolError("MAC/tag verification failed")
+    raise ProtocolError(MAC_FAILURE)
   }
   // Step 5/6: decrypt the body under K_2, counter 1, and strip padding.
   let body = @crypto.fixed_to_bytes(
