@@ -79,7 +79,7 @@ pub fn KexInit::for_role(role : Role, cookie~ : Bytes) -> KexInit {
 /// reserved uint32.
 pub fn KexInit::encode(self : KexInit) -> Bytes raise ProtocolError {
   self.encode_kexinit() catch {
-    e => raise wire_error(e)
+    e => raise wire_error("KEXINIT", e)
   }
 }
 
@@ -108,23 +108,11 @@ fn KexInit::encode_kexinit(self : KexInit) -> Bytes raise @wire.WireError {
 /// whole payload must be consumed; wire-level failures are wrapped in
 /// `ProtocolError` per docs/01.
 pub fn KexInit::decode(payload : BytesView) -> KexInit raise ProtocolError {
-  let r = @wire.Reader::new(payload)
-  let msg = r.read_byte() catch { e => raise wire_error(e) }
-  if msg != SSH_MSG_KEXINIT {
-    raise ProtocolError(
-      "KEXINIT: expected message \{SSH_MSG_KEXINIT.to_int()}, got \{msg.to_int()}",
-    )
-  }
-  let ki = read_kexinit_fields(r) catch { e => raise wire_error(e) }
-  if !r.is_at_end() {
-    raise ProtocolError("KEXINIT: \{r.remaining()} trailing byte(s)")
-  }
+  let ctx = "KEXINIT"
+  let r = expect_message(payload, SSH_MSG_KEXINIT, ctx)
+  let ki = read_kexinit_fields(r) catch { e => raise wire_error(ctx, e) }
+  expect_end(r, ctx)
   ki
-}
-
-///|
-fn wire_error(e : @wire.WireError) -> ProtocolError {
-  ProtocolError("KEXINIT: \{Repr(e)}")
 }
 
 ///|

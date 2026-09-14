@@ -187,6 +187,27 @@ little-endian byte arrays**.
 - For sans-IO protocol tests, no async is needed — the state machines are synchronous, so
   those tests run on any backend. Only `net/` and the binaries require `--target native`.
 
+### Toolchain quirks observed (moon 0.1.20260904 / moonc v0.10.12)
+
+- `moon test -p <pkg>` works but `moon check -p <pkg>` treats the argument as a directory;
+  use `moon check src/<pkg>`.
+- Bare `moon fmt` formats the whole module; while parallel agents edit one package, run
+  `moon fmt src/<pkg>` (or the files) and give each agent its own `--target-dir _build_<x>`.
+- Deprecated and their replacements: `try?` → `try … catch {} noraise {}`; `derive(Show)` →
+  `derive(Debug)` + `debug_inspect`; `Bytes::from_fixedarray` → `Bytes::from_iter(a.iter())`;
+  `StringBuilder::new` → `StringBuilder()`; `@buffer.Buffer(size_hint~)` is a constructor
+  call; `@sys.get_cli_args()` → `@env.args()` (index 0 is the program name on native).
+- A `catch` arm cannot carry a type annotation. A `pub struct` may not expose a `priv` type
+  in its fields (use a `pub` enum with no `pub(all)` to keep it opaque).
+- `async fn main` needs `raise` when the body calls raising async functions:
+  `async fn main raise { … }`. `moonbitlang/async` must be imported by any package that
+  declares `async fn main` or `async test`; a test-only import goes in the `for "test"` block.
+- `Array::sort` on `String` orders by length first, so do not pin sorted string lists in
+  tests; assert membership instead.
+- Socket tests (`net/`) fail inside a write-restricted sandbox with
+  `TcpServer::new(): Operation not permitted`; run them unsandboxed. macOS has no `timeout`
+  command, so bound `ssh` with `-o ConnectTimeout` instead.
+
 ## 7. Common pitfalls checklist (SSH-specific, MoonBit-flavored)
 
 - [ ] `mpint(K)`: added the leading `0x00` when the top bit is set? (kex hash breaks otherwise)

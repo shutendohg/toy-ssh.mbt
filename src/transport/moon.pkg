@@ -1,5 +1,8 @@
 import {
+  "moonbitlang/core/buffer",
   "moonbitlang/core/encoding/ascii",
+  "moonbitlang/x/crypto" @xcrypto,
+  "shutendohg/toy-ssh/crypto",
   "shutendohg/toy-ssh/wire",
 }
 
