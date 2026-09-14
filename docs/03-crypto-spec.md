@@ -17,7 +17,7 @@ Green (make it pass) → Refactor. Do not proceed to the transport layer until a
 | SHA-256 | `moonbitlang/x/crypto` | `sha256(data) -> FixedArray[Byte]` (32 bytes); streaming `SHA256::new()`, `update(self, data)`, `finalize(self)` |
 | SHA-512 | `moonbitlang/x/crypto` (≥0.5.5) | `sha512(data) -> FixedArray[Byte]` (64 bytes); streaming `SHA512::new()`, `update`, `finalize` |
 | HMAC | `moonbitlang/x/crypto` | `hmac(hasher, key, message) -> FixedArray[Byte]` (generic over `CryptoHasher`) |
-| base64 | `moonbitlang/x/codec/base64` | encode/decode for `authorized_keys` / key files |
+| base64 | `moonbitlang/core/encoding/base64` | encode/decode for `authorized_keys` / key files (padding and whitespace options; see doc 05) |
 | ChaCha20 | `moonbitlang/x/crypto` | `ChaCha::chacha20(key, nonce, counter?) -> Self`, `transform(self, data, out, offset?)` — IETF variant (see §2 for how to drive it as the SSH cipher) |
 
 > Verify these signatures against the actual installed version with `moon info` before coding

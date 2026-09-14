@@ -55,7 +55,7 @@ src/bin/client  src/bin/server        docs/  .claude/plans/
 ```
 
 Dependency direction: `wire → crypto → keys → transport → auth → connection → net → bin`.
-Reuse `moonbitlang/x/crypto` (SHA-256, SHA-512, HMAC, ChaCha20) and `moonbitlang/x/codec/base64`;
+Reuse `moonbitlang/x/crypto` (SHA-256, SHA-512, HMAC, ChaCha20) and `moonbitlang/core/encoding/base64`;
 build the other three primitives by hand — Poly1305, X25519, Ed25519 (`docs/03`). IO via
 `moonbitlang/async` (native backend, macOS and Linux).
 

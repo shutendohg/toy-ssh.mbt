@@ -71,7 +71,7 @@ library package importing x/crypto and our wire package, with an alias:
 ```
 import {
   "moonbitlang/x/crypto" @xcrypto,
-  "moonbitlang/x/codec/base64",
+  "moonbitlang/core/encoding/base64",
   "shutendohg/toy-ssh/wire",
 }
 ```

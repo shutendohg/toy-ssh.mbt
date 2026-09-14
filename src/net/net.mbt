@@ -26,7 +26,12 @@ pub async fn read_text_file(path : String) -> String {
 /// Append `text` to a file, creating it if needed. Used for the client's
 /// trust-on-first-use known_hosts update.
 pub async fn append_text_file(path : String, text : String) -> Unit {
-  @fs.write_file(path, @ascii.encode(text), append=true, create_mode=OpenOrCreate)
+  @fs.write_file(
+    path,
+    @ascii.encode(text),
+    append=true,
+    create_mode=OpenOrCreate,
+  )
 }
 
 ///|

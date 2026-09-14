@@ -102,6 +102,20 @@ pub fn Writer::write_mpint(self : Writer, magnitude : BytesView) -> Unit {
 }
 
 ///|
+/// A `string name || string body` pair: the shape shared by every SSH
+/// public key blob, signature blob and key-file entry (RFC 4253 section
+/// 6.6, RFC 8709). Only the encoding lives here; which names and body
+/// lengths are acceptable is policy for the layer that calls this.
+pub fn Writer::write_named_blob(
+  self : Writer,
+  name : String,
+  body : BytesView,
+) -> Unit {
+  self.write_str(name)
+  self.write_string(body)
+}
+
+///|
 /// `name-list`: comma-separated ASCII names, order significant. Each name
 /// must be non-empty printable US-ASCII without commas (RFC 4251 section
 /// 5); anything else would not round-trip through `read_name_list`.
@@ -273,4 +287,17 @@ pub fn Reader::read_name_list(self : Reader) -> Array[String] raise WireError {
   }
   flush()
   names
+}
+
+///|
+/// Read a `string name || string body` pair (see `write_named_blob`). The
+/// cursor is left where the body ends, so the caller decides whether
+/// trailing bytes are an error and what an acceptable name and body length
+/// are.
+pub fn Reader::read_named_blob(
+  self : Reader,
+) -> (String, BytesView) raise WireError {
+  let name = self.read_str()
+  let body = self.read_string()
+  (name, body)
 }

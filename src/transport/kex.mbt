@@ -225,8 +225,7 @@ const ED25519_SIG_LEN : Int = 64
 /// `string "ssh-ed25519" || string body`.
 fn encode_ed25519_blob(body : BytesView) -> Bytes {
   let w = @wire.Writer::new(size_hint=16 + 4 + body.length())
-  w.write_str(HOSTKEY_ED25519)
-  w.write_string(body)
+  w.write_named_blob(HOSTKEY_ED25519, body)
   w.to_bytes()
 }
 
@@ -240,9 +239,7 @@ fn decode_ed25519_blob(
   want_len : Int,
 ) -> Bytes raise ProtocolError {
   let r = @wire.Reader::new(blob)
-  let (name, body) = (r.read_str(), r.read_string()) catch {
-    e => raise wire_error(ctx, e)
-  }
+  let (name, body) = r.read_named_blob() catch { e => raise wire_error(ctx, e) }
   if name != HOSTKEY_ED25519 {
     raise ProtocolError("\{ctx}: expected \{HOSTKEY_ED25519}, got \{name}")
   }

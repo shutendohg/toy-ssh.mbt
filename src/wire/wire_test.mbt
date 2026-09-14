@@ -222,3 +222,43 @@ test "write_name_list: rejects names that would not round-trip" {
   expect_invalid(["a b"])
   expect_invalid(["日本"])
 }
+
+///|
+test "named blob: write and read the `string name || string body` shape" {
+  // The shape of every SSH key and signature blob (RFC 4253 section 6.6).
+  let w = @wire.Writer::new()
+  w.write_named_blob("ssh-ed25519", b"\x01\x02\x03")
+  inspect(
+    @hex.encode(w.to_bytes()[:]),
+    content="0000000b" + "7373682d65643235353139" + "00000003" + "010203",
+  )
+  let r = @wire.Reader::new(w.to_bytes()[:])
+  let (name, body) = r.read_named_blob()
+  inspect(name, content="ssh-ed25519")
+  inspect(@hex.encode(body), content="010203")
+  assert_true(r.is_at_end())
+}
+
+///|
+test "named blob: the reader leaves trailing bytes to the caller" {
+  // Length and trailing-byte policy belongs to each layer, so the reader
+  // only advances past the two strings.
+  let w = @wire.Writer::new()
+  w.write_named_blob("ssh-ed25519", b"")
+  let buf = w.to_bytes() + b"\xff"
+  let r = @wire.Reader::new(buf[:])
+  let (name, body) = r.read_named_blob()
+  inspect(name, content="ssh-ed25519")
+  inspect(body.length(), content="0")
+  inspect(r.remaining(), content="1")
+}
+
+///|
+test "named blob: a truncated blob is a short read" {
+  let r = @wire.Reader::new(b"\x00\x00\x00\x0bssh-ed255"[:])
+  try r.read_named_blob() catch {
+    e => debug_inspect(e, content="ShortRead(need=11, have=9)")
+  } noraise {
+    _ => fail("expected read_named_blob to raise")
+  }
+}

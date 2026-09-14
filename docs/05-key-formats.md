@@ -3,7 +3,10 @@
 Covers the on-disk formats the toy needs: the `openssh-key-v1` private key container
 (unencrypted only), `authorized_keys` lines, and `known_hosts` / TOFU. Everything is
 Ed25519-only. `keys/` depends on `crypto` (Ed25519) and `wire` (blob codec) and reuses
-`moonbitlang/x/codec/base64`.
+`moonbitlang/core/encoding/base64`. (`moonbitlang/x/codec/base64` also exists, but core's
+`decode(s, ignore_whitespace?)` swallows the PEM line wrapping and its
+`encode(b, padding?)` covers both the padded form used in key lines and the unpadded form
+used in fingerprints, so core is the better fit here.)
 
 ## 1. Public key line (`.pub` / `authorized_keys` entry)
 
@@ -68,7 +71,7 @@ Notes and traps:
   `1,2,3,…` — reject otherwise (cheap corruption check).
 - **Ed25519 `private_key` field is 64 bytes**: `seed (32) || public_key A (32)`. RFC 8032's
   "secret key" is the 32-byte *seed*; take the first 32 bytes as the seed you feed to
-  `ed25519_sign`. Verify the embedded `A` equals `ed25519_public_key(seed)` — if not, the file
+  `Ed25519KeyPair::from_seed`. Verify the embedded `A` equals `ed25519_public_key(seed)` — if not, the file
   is corrupt or you sliced wrong.
 - If `ciphername != "none"` or `kdfname != "none"`, **fail with a clear "encrypted keys not
   supported; re-generate with `-N ''` or decrypt first"** message. Do not attempt bcrypt-pbkdf.
@@ -109,7 +112,8 @@ hashed hostnames (`|1|...`) — plain host patterns only.
    document it as insecure) or prompt. Append the new line to the known_hosts file.
 
 Fingerprint: `SHA256:` + base64(no padding) of `sha256(public_key_blob)`. Reuse the SHA-256
-from `moonbitlang/x/crypto` and base64 from `moonbitlang/x/codec/base64`.
+from `moonbitlang/x/crypto` and base64 from `moonbitlang/core/encoding/base64`
+(`encode(blob, padding=false)`).
 
 ## 4. Server host key & user db (server side)
 
