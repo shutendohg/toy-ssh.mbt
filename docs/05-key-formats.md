@@ -97,7 +97,10 @@ Format (one host key per line, subset of OpenSSH's):
 ```
 
 where `<host>` is `hostname` or `[hostname]:port` for non-22 ports. We do **not** implement
-hashed hostnames (`|1|...`) — plain host patterns only.
+hashed hostnames (`|1|...`), wildcards (`*`, `?`) or negation (`!`) — plain host patterns
+only, and a line using any of them **fails the whole file**. Accepting such a line and
+matching it literally would leave it silently unmatchable, and an unmatched host reads as
+"unknown", which trust-on-first-use then accepts.
 
 **Trust-on-first-use policy:**
 
@@ -119,7 +122,8 @@ from `moonbitlang/x/crypto` and base64 from `moonbitlang/core/encoding/base64`
 
 - The server loads its Ed25519 host private key from an `openssh-key-v1` file (path via CLI
   flag), parses it per §2, and uses the seed for signing the exchange hash.
-- For `publickey` auth, the server loads each user's `authorized_keys` (path via flag or a
-  simple `user -> file` config). For `password` auth, a config file maps `user -> password`
+- For `publickey` auth, the server loads each user's `authorized_keys` (`--authorized-keys
+  USER:FILE`, repeatable). **Scope it per user**: one shared list that authorizes any claimed
+  user name is an authorization bug as soon as the connection layer runs commands. For `password` auth, a config file maps `user -> password`
   (plaintext; documented insecure, toy only).
 - Generate the server host key in verification with the same `ssh-keygen` command as above.

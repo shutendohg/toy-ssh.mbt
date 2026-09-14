@@ -187,3 +187,58 @@ test "client: garbage from the server is reported, never a crash" {
     assert_false(c.is_authenticated())
   }
 }
+
+///|
+test "client: PK_OK must echo the algorithm and blob we offered" {
+  // RFC 4252 section 7: the server answers a query with the same algorithm
+  // name and key blob. Signing whatever a server echoes back would let it
+  // choose part of what our key signs, so refuse a mismatch.
+  let seed = @hex.decode(
+    "4769cb68b5132480f4a45bb160d4a78640c0055eb0ca449538c5b3b6c99b727c",
+  )
+  let key = @crypto.Ed25519KeyPair::from_seed(seed[:])
+  let blob = @auth.encode_ed25519_public_key_blob(key.public()[:])
+  fn fresh() -> @auth.AuthClient {
+    let c = @auth.AuthClient::new({
+      user: "alice",
+      session_id: Bytes::make(32, b'\x07'),
+      probe_none: false,
+      key: Some(key),
+      password: None,
+      query_first: true,
+    })
+    ignore(c.take_outgoing())
+    c
+  }
+
+  // The honest echo is accepted and produces a signed request.
+  let ok = fresh()
+  inspect(
+    ok
+    .on_payload(@auth.encode_userauth_pk_ok("ssh-ed25519", blob[:])[:])
+    .length(),
+    content="0",
+  )
+  inspect(ok.take_outgoing().length(), content="1")
+  // A different key's blob is refused.
+  let other_blob = @auth.encode_ed25519_public_key_blob(
+    Bytes::make(32, b'\x01')[:],
+  )
+  let bad_blob = fresh()
+  let ev = bad_blob.on_payload(
+    @auth.encode_userauth_pk_ok("ssh-ed25519", other_blob[:])[:],
+  )
+  guard ev.length() == 1 && ev[0] is ProtocolViolation(_) else {
+    fail("expected ProtocolViolation, got \{ev.length()} event(s)")
+  }
+  inspect(bad_blob.take_outgoing().length(), content="0")
+  // A different algorithm name is refused.
+  let bad_alg = fresh()
+  let ev2 = bad_alg.on_payload(
+    @auth.encode_userauth_pk_ok("ssh-rsa", blob[:])[:],
+  )
+  guard ev2.length() == 1 && ev2[0] is ProtocolViolation(_) else {
+    fail("expected ProtocolViolation, got \{ev2.length()} event(s)")
+  }
+  inspect(bad_alg.take_outgoing().length(), content="0")
+}

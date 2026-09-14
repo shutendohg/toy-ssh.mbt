@@ -84,13 +84,15 @@ Since M3 the server loads an `openssh-key-v1` file, so the host key is stable ac
 ```
 server --listen 127.0.0.1:2222 \
        --host-key ./interop/host_ed25519 \
-       --authorized-keys ./interop/toy_authorized_keys \
+       --authorized-keys user:./interop/toy_authorized_keys \
        --passwords ./interop/toy_passwords
 ```
 
-`--authorized-keys` takes a `.pub`/`authorized_keys` file (`cp client_ed25519.pub
-toy_authorized_keys`), and `--passwords` takes plaintext `user:password` lines
-(`user:hunter2`) — insecure by construction, toy only. `--host-seed-hex <64 hex>` still
+`--authorized-keys` is `USER:FILE` and may be repeated: a key authorizes only the account it
+is configured for, so the same key presented as another user name is refused (verified —
+`ssh attacker@…` gets "Permission denied" while `ssh user@…` succeeds). `--passwords` takes
+plaintext `user:password` lines (`user:hunter2`), and an empty password is refused at
+startup. Both are insecure by construction, toy only. `--host-seed-hex <64 hex>` still
 exists as an alternative to a key file; with it, **pin the seed across runs**, because a
 fresh random seed per start makes `ssh` reject the second connection with "REMOTE HOST
 IDENTIFICATION HAS CHANGED" once `accept-new` has recorded the first key.

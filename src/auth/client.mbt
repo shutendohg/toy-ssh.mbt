@@ -172,6 +172,19 @@ fn AuthClient::dispatch(
     SSH_MSG_USERAUTH_PK_OK =>
       if self.phase is PkQuery {
         let (algorithm, blob) = decode_userauth_pk_ok(payload)
+        // RFC 4252 section 7: the reply carries back the algorithm name
+        // and key blob from the request. Signing whatever the server
+        // echoes would let it choose part of what our key signs, so sign
+        // only for the offer we actually made.
+        guard self.cfg.key is Some(key) else {
+          raise AuthError("USERAUTH_PK_OK: no publickey offered")
+        }
+        let offered = encode_ed25519_public_key_blob(key.public()[:])
+        if algorithm != PUBLICKEY_ALGORITHM || blob != offered {
+          raise AuthError(
+            "USERAUTH_PK_OK: reply does not echo the offered \{PUBLICKEY_ALGORITHM} key",
+          )
+        }
         self.outgoing.push(self.sign_request(algorithm, blob))
         self.phase = PkSigned
       } else {

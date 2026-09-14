@@ -672,3 +672,22 @@ test "fingerprint: OpenSSH style SHA256 of the blob, base64 without padding" {
     content="SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8",
   )
 }
+
+///|
+test "known_hosts: wildcard and negated patterns are refused, not left unmatchable" {
+  // Matching is literal, so a pattern we cannot evaluate must fail the
+  // file. Leaving it in would make the entry silently unmatchable, and the
+  // client's trust-on-first-use would then accept any key for that host.
+  let b64 = "AAAAC3NzaC1lZDI1NTE5AAAAIFMnJJyZjlxlJrspqvLDVH5xBzT5+GrXwznTe6FPQOen"
+  for pattern in ["*.example.com", "192.168.1.?", "!badhost", "host,*.other"] {
+    try @keys.parse_known_hosts("\{pattern} ssh-ed25519 \{b64}\n") catch {
+      Unsupported(_) => ()
+      e => fail("expected Unsupported for \{pattern}, got \{Repr(e)}")
+    } noraise {
+      _ => fail("expected parse_known_hosts to refuse \{pattern}")
+    }
+  }
+  // A plain pattern still parses.
+  let ok = @keys.parse_known_hosts("[127.0.0.1]:2200 ssh-ed25519 \{b64}\n")
+  inspect(ok.length(), content="1")
+}

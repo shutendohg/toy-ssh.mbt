@@ -74,6 +74,17 @@ pub fn parse_known_hosts(body : String) -> Array[KnownHost] raise KeyError {
       if pattern.length() == 0 {
         raise BadFormat("\{ctx}: empty host pattern")
       }
+      // Matching below is literal. A pattern we cannot evaluate has to
+      // fail the file: left in place it would be silently unmatchable, and
+      // an unmatched host reads as `Unknown`, which trust-on-first-use
+      // then accepts. Fail closed instead.
+      for c in pattern {
+        if c == '*' || c == '?' || c == '!' {
+          raise Unsupported(
+            "\{ctx}: host pattern \{Repr(pattern.to_owned())} uses wildcards or negation, which are not supported",
+          )
+        }
+      }
       hosts.push(pattern.to_owned())
     }
     // Reuse the type / base64 / blob checks; a known_hosts line has no

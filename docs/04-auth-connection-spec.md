@@ -92,7 +92,9 @@ string    public_key_blob              # ssh-ed25519 blob (see 02 §5)
 ```
 
 Server replies `SSH_MSG_USERAUTH_PK_OK` (60) echoing algorithm + blob if the key is in the
-user's `authorized_keys`; otherwise FAILURE.
+user's `authorized_keys`; otherwise FAILURE. **The client must check that the reply echoes
+the algorithm and blob it offered** — signing whatever a server sends back would let it
+choose part of what the client's key signs.
 
 ```
 byte      60

@@ -6,8 +6,13 @@
 /// ```
 /// server [--listen 127.0.0.1:2222]
 ///        (--host-key <openssh-key-v1 file> | --host-seed-hex <64 hex>)
-///        [--authorized-keys <file>] [--passwords <file>]
+///        [--authorized-keys <user>:<file>]... [--passwords <file>]
 /// ```
+///
+/// `--authorized-keys` is per user and may be repeated, because a key must
+/// authorize one account rather than any name the client claims. M3 has no
+/// per-user behaviour yet, but M4 runs commands, so the scoping belongs
+/// here before it can be relied on.
 ///
 /// The passwords file is plaintext `user:password` lines. That is insecure
 /// and exists only because this is a toy.
@@ -29,7 +34,9 @@ struct ServerOptions {
   listen : String
   host_key_path : String?
   host_seed_hex : String?
-  authorized_keys_path : String?
+  /// `user` -> `authorized_keys` path. A key authorizes only the user it
+  /// was configured for.
+  authorized_keys_paths : Array[(String, String)]
   passwords_path : String?
 }
 
@@ -39,21 +46,28 @@ async fn main {
   let host_seed = load_host_seed(opts)
   // Read the policy files once at startup: a connection handler cannot do
   // IO (the transport callbacks are synchronous).
-  let authorized = match opts.authorized_keys_path {
-    Some(path) => @keys.parse_authorized_keys(@net.read_text_file(path))
-    None => []
+  let authorized : Map[String, Array[@keys.PublicKey]] = Map([])
+  for pair in opts.authorized_keys_paths {
+    let (user, path) = pair
+    let entries = @keys.parse_authorized_keys(@net.read_text_file(path))
+    match authorized.get(user) {
+      Some(existing) => existing.append(entries)
+      None => authorized[user] = entries
+    }
   }
   let passwords = match opts.passwords_path {
     Some(path) => parse_passwords(@net.read_text_file(path))
     None => Map([])
   }
   @net.log(
-    "toy-ssh server: \{authorized.length()} authorized key(s), \{passwords.length()} password entr(ies)",
+    "toy-ssh server: \{authorized.length()} user(s) with keys, \{passwords.length()} password entr(ies)",
   )
-  for entry in authorized {
-    @net.log(
-      "toy-ssh server: authorized \{entry.fingerprint()} \{entry.comment}",
-    )
+  for user, entries in authorized {
+    for entry in entries {
+      @net.log(
+        "toy-ssh server: \{user} authorized \{entry.fingerprint()} \{entry.comment}",
+      )
+    }
   }
   let server = @socket.TcpServer(
     @socket.Addr::parse(opts.listen),
@@ -74,7 +88,7 @@ async fn serve(
   conn : @socket.Tcp,
   peer : @socket.Addr,
   host_seed : Bytes,
-  authorized : Array[@keys.PublicKey],
+  authorized : Map[String, Array[@keys.PublicKey]],
   passwords : Map[String, String],
 ) -> Unit {
   let t = @transport.Transport::new(@net.server_config(host_seed~))
@@ -95,11 +109,14 @@ async fn serve(
                 None => false
               }
             },
-            authorize_public_key: (_, blob) => {
+            authorize_public_key: (user, blob) => {
+              // Scoped to the user: a key listed for one account must not
+              // authenticate another.
+              guard authorized.get(user) is Some(entries) else { return false }
               let public = @keys.decode_public_key_blob(blob[:]) catch {
                 _ => return false
               }
-              @keys.is_authorized(authorized[:], public[:])
+              @keys.is_authorized(entries[:], public[:])
             },
             banner: Some(
               "toy-ssh server: authentication is a toy, do not trust it\n",
@@ -212,6 +229,26 @@ async fn load_host_seed(opts : ServerOptions) -> Bytes {
 }
 
 ///|
+/// `USER:FILE` for `--authorized-keys`. The separator is the first colon,
+/// so a path may contain one.
+fn split_user_path(value : String) -> (String, String) {
+  let chars = value.to_array()
+  let mut at = -1
+  for n, c in chars {
+    if c == ':' && at < 0 {
+      at = n
+    }
+  }
+  if at <= 0 || at == chars.length() - 1 {
+    usage_error("--authorized-keys needs USER:FILE, got \{value}")
+  }
+  (
+    String::from_array(chars[0:at].to_owned()),
+    String::from_array(chars[at + 1:].to_owned()),
+  )
+}
+
+///|
 /// `user:password` per line; blank lines and `#` comments are skipped.
 /// A password is everything after the first colon, so it may contain one.
 /// Plaintext passwords in a file are insecure; this is a toy.
@@ -236,6 +273,10 @@ fn parse_passwords(body : String) -> Map[String, String] {
     }
     let user = String::from_array(chars[0:at].to_owned())
     let password = String::from_array(chars[at + 1:].to_owned())
+    if password.length() == 0 {
+      // An empty password would match a client that sends none.
+      usage_error("passwords file line \{i + 1}: empty password for \{user}")
+    }
     out[user] = password
   }
   out
@@ -246,14 +287,14 @@ fn parse_args(args : Array[String]) -> ServerOptions {
   let mut listen = "127.0.0.1:2222"
   let mut host_key_path : String? = None
   let mut host_seed_hex : String? = None
-  let mut authorized_keys_path : String? = None
+  let authorized_keys_paths : Array[(String, String)] = []
   let mut passwords_path : String? = None
   let mut i = 1
   while i < args.length() {
     let flag = args[i]
     if flag == "--help" {
       println(
-        "usage: server [--listen ADDR] (--host-key FILE | --host-seed-hex HEX) [--authorized-keys FILE] [--passwords FILE]",
+        "usage: server [--listen ADDR] (--host-key FILE | --host-seed-hex HEX) [--authorized-keys USER:FILE]... [--passwords FILE]",
       )
       @sys.exit(0)
     }
@@ -263,7 +304,7 @@ fn parse_args(args : Array[String]) -> ServerOptions {
       "--listen" => listen = value
       "--host-key" => host_key_path = Some(value)
       "--host-seed-hex" => host_seed_hex = Some(value)
-      "--authorized-keys" => authorized_keys_path = Some(value)
+      "--authorized-keys" => authorized_keys_paths.push(split_user_path(value))
       "--passwords" => passwords_path = Some(value)
       _ => usage_error("unknown argument: \{flag}")
     }
@@ -273,7 +314,7 @@ fn parse_args(args : Array[String]) -> ServerOptions {
     listen,
     host_key_path,
     host_seed_hex,
-    authorized_keys_path,
+    authorized_keys_paths,
     passwords_path,
   }
 }
