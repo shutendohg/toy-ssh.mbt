@@ -46,7 +46,8 @@ Dependency direction (a package may only import things to its left):
 wire  →  crypto  →  keys  →  transport  →  auth  →  connection  →  net  →  bin
 ```
 
-`crypto` reuses `moonbitlang/x/crypto` for SHA-256 and HMAC and `moonbitlang/x/codec/base64`
+`crypto` reuses `moonbitlang/x/crypto` for SHA-256 and HMAC, and `keys` uses
+`moonbitlang/core/encoding/base64`
 for base64; everything else in `crypto` is ours. `keys` depends on `crypto` (Ed25519) and
 `wire` (blob encoding). Nothing above `net` is imported by protocol layers.
 

@@ -17,7 +17,7 @@ fn check_vector(
   let msg = @hex.decode(msg_hex)
   let public = @crypto.ed25519_public_key(secret)
   assert_eq(ed_hex(public), public_hex)
-  let sig = @crypto.ed25519_sign(secret, msg)
+  let sig = @crypto.Ed25519KeyPair::from_seed(secret[:]).sign(msg[:])
   assert_eq(ed_hex(sig), sig_hex)
   assert_true(
     @crypto.ed25519_verify(@hex.decode(public_hex), msg, @hex.decode(sig_hex)),
@@ -130,4 +130,24 @@ test "ed25519 verify rejects S >= L and malformed inputs" {
   assert_false(
     @crypto.ed25519_verify(@crypto.fixed_to_bytes(bad_pub), b"", sig),
   )
+}
+
+///|
+test "Ed25519KeyPair: caches the public key and signs like the seed API" {
+  // RFC 8032 section 7.1 TEST 1.
+  let seed = @hex.decode(
+    "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  )
+  let kp = @crypto.Ed25519KeyPair::from_seed(seed[:])
+  inspect(
+    @hex.encode(kp.public()[:]),
+    content="d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  )
+  assert_eq(kp.seed(), seed)
+  inspect(
+    ed_hex(kp.sign(b""[:])),
+    content="e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+  )
+  // Signing twice must not disturb the cached state.
+  assert_eq(ed_hex(kp.sign(b"abc"[:])), ed_hex(kp.sign(b"abc"[:])))
 }

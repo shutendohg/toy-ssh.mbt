@@ -1,12 +1,15 @@
 import {
   "moonbitlang/async/fs",
+  "moonbitlang/core/encoding/utf8",
   "moonbitlang/async/socket",
+  "moonbitlang/async/stdio",
   "moonbitlang/core/random",
   "shutendohg/toy-ssh/transport",
 }
 
 import {
   "moonbitlang/async",
+  "moonbitlang/core/env",
 } for "test"
 
 supported_targets = "+native"

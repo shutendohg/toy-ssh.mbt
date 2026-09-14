@@ -16,6 +16,64 @@ pub async fn random_bytes(n : Int) -> Bytes {
 }
 
 ///|
+/// Write one diagnostic line to standard error, immediately.
+///
+/// `println` goes through C stdio, which is fully buffered when standard
+/// output is a file or a pipe: a long-running server would show nothing
+/// until it exited. Diagnostics also belong on standard error so that a
+/// remote command's output can own standard output verbatim.
+///
+/// Encoded as UTF-8, not ASCII: log lines carry peer-controlled text (a
+/// user name from USERAUTH_REQUEST, a server banner, a DISCONNECT
+/// description), and `@ascii.encode` *panics* above 0x7f — which no
+/// `catch` can contain, so one packet would kill the process.
+pub async fn log(line : String) -> Unit {
+  @stdio.stderr.write(@utf8.encode(line + "\n"))
+}
+
+///|
+/// Whole-file text read. Key files, `authorized_keys` and `known_hosts`
+/// are all small enough to slurp; the parsers in `keys/` work on the text.
+pub async fn read_text_file(path : String) -> String {
+  @fs.read_file(path).text()
+}
+
+///|
+/// Append `text` to a file, creating it if needed. Used for the client's
+/// trust-on-first-use known_hosts update.
+pub async fn append_text_file(path : String, text : String) -> Unit {
+  @fs.write_file(
+    path,
+    @utf8.encode(text),
+    append=true,
+    create_mode=OpenOrCreate,
+  )
+}
+
+///|
+/// Append `line` as its own line, adding a leading newline when the file
+/// does not already end with one.
+///
+/// A hand-edited or third-party-written file may lack a final newline;
+/// appending straight onto it would splice two entries into one corrupt
+/// line, which the strict parsers then refuse for good.
+pub async fn append_line(path : String, line : String) -> Unit {
+  let existing = if @fs.exists(path) { read_text_file(path) } else { "" }
+  let prefix = if existing.length() > 0 && !existing.has_suffix("\n") {
+    "\n"
+  } else {
+    ""
+  }
+  append_text_file(path, prefix + line + "\n")
+}
+
+///|
+/// Whether `path` exists.
+pub async fn file_exists(path : String) -> Bool {
+  @fs.exists(path)
+}
+
+///|
 /// Random padding filler for production packets (RFC 4253 section 6:
 /// padding SHOULD be random). Uses a per-call chacha8 generator seeded from
 /// `seed` so the synchronous `fill` callback needs no IO.
@@ -63,7 +121,7 @@ pub async fn server_config(host_seed~ : Bytes) -> @transport.TransportConfig {
 pub async fn run(
   conn : @socket.Tcp,
   t : @transport.Transport,
-  on_event : (@transport.Transport, @transport.TransportEvent) -> Unit,
+  on_event : async (@transport.Transport, @transport.TransportEvent) -> Unit,
 ) -> Unit {
   let buf = FixedArray::make(16384, b'\x00')
   flush(conn, t)

@@ -225,8 +225,7 @@ const ED25519_SIG_LEN : Int = 64
 /// `string "ssh-ed25519" || string body`.
 fn encode_ed25519_blob(body : BytesView) -> Bytes {
   let w = @wire.Writer::new(size_hint=16 + 4 + body.length())
-  w.write_str(HOSTKEY_ED25519)
-  w.write_string(body)
+  w.write_named_blob(HOSTKEY_ED25519, body)
   w.to_bytes()
 }
 
@@ -240,9 +239,7 @@ fn decode_ed25519_blob(
   want_len : Int,
 ) -> Bytes raise ProtocolError {
   let r = @wire.Reader::new(blob)
-  let (name, body) = (r.read_str(), r.read_string()) catch {
-    e => raise wire_error(ctx, e)
-  }
+  let (name, body) = r.read_named_blob() catch { e => raise wire_error(ctx, e) }
   if name != HOSTKEY_ED25519 {
     raise ProtocolError("\{ctx}: expected \{HOSTKEY_ED25519}, got \{name}")
   }
@@ -359,10 +356,13 @@ pub fn exchange_hash(
 }
 
 ///|
-/// Server side: sign the 32-byte exchange hash with the Ed25519 host seed
+/// Server side: sign the 32-byte exchange hash with the Ed25519 host key
 /// and return the `ssh-ed25519` signature blob.
-pub fn sign_exchange_hash(host_seed : BytesView, h : BytesView) -> Bytes {
-  let sig = @crypto.fixed_to_bytes(@crypto.ed25519_sign(host_seed, h))
+pub fn sign_exchange_hash(
+  host_key : @crypto.Ed25519KeyPair,
+  h : BytesView,
+) -> Bytes {
+  let sig = @crypto.fixed_to_bytes(host_key.sign(h))
   encode_ed25519_signature(sig[:])
 }
 

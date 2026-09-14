@@ -3,7 +3,10 @@
 Covers the on-disk formats the toy needs: the `openssh-key-v1` private key container
 (unencrypted only), `authorized_keys` lines, and `known_hosts` / TOFU. Everything is
 Ed25519-only. `keys/` depends on `crypto` (Ed25519) and `wire` (blob codec) and reuses
-`moonbitlang/x/codec/base64`.
+`moonbitlang/core/encoding/base64`. (`moonbitlang/x/codec/base64` also exists, but core's
+`decode(s, ignore_whitespace?)` swallows the PEM line wrapping and its
+`encode(b, padding?)` covers both the padded form used in key lines and the unpadded form
+used in fingerprints, so core is the better fit here.)
 
 ## 1. Public key line (`.pub` / `authorized_keys` entry)
 
@@ -68,7 +71,7 @@ Notes and traps:
   `1,2,3,…` — reject otherwise (cheap corruption check).
 - **Ed25519 `private_key` field is 64 bytes**: `seed (32) || public_key A (32)`. RFC 8032's
   "secret key" is the 32-byte *seed*; take the first 32 bytes as the seed you feed to
-  `ed25519_sign`. Verify the embedded `A` equals `ed25519_public_key(seed)` — if not, the file
+  `Ed25519KeyPair::from_seed`. Verify the embedded `A` equals `ed25519_public_key(seed)` — if not, the file
   is corrupt or you sliced wrong.
 - If `ciphername != "none"` or `kdfname != "none"`, **fail with a clear "encrypted keys not
   supported; re-generate with `-N ''` or decrypt first"** message. Do not attempt bcrypt-pbkdf.
@@ -94,7 +97,10 @@ Format (one host key per line, subset of OpenSSH's):
 ```
 
 where `<host>` is `hostname` or `[hostname]:port` for non-22 ports. We do **not** implement
-hashed hostnames (`|1|...`) — plain host patterns only.
+hashed hostnames (`|1|...`), wildcards (`*`, `?`) or negation (`!`) — plain host patterns
+only, and a line using any of them **fails the whole file**. Accepting such a line and
+matching it literally would leave it silently unmatchable, and an unmatched host reads as
+"unknown", which trust-on-first-use then accepts.
 
 **Trust-on-first-use policy:**
 
@@ -109,13 +115,15 @@ hashed hostnames (`|1|...`) — plain host patterns only.
    document it as insecure) or prompt. Append the new line to the known_hosts file.
 
 Fingerprint: `SHA256:` + base64(no padding) of `sha256(public_key_blob)`. Reuse the SHA-256
-from `moonbitlang/x/crypto` and base64 from `moonbitlang/x/codec/base64`.
+from `moonbitlang/x/crypto` and base64 from `moonbitlang/core/encoding/base64`
+(`encode(blob, padding=false)`).
 
 ## 4. Server host key & user db (server side)
 
 - The server loads its Ed25519 host private key from an `openssh-key-v1` file (path via CLI
   flag), parses it per §2, and uses the seed for signing the exchange hash.
-- For `publickey` auth, the server loads each user's `authorized_keys` (path via flag or a
-  simple `user -> file` config). For `password` auth, a config file maps `user -> password`
+- For `publickey` auth, the server loads each user's `authorized_keys` (`--authorized-keys
+  USER:FILE`, repeatable). **Scope it per user**: one shared list that authorizes any claimed
+  user name is an authorization bug as soon as the connection layer runs commands. For `password` auth, a config file maps `user -> password`
   (plaintext; documented insecure, toy only).
 - Generate the server host key in verification with the same `ssh-keygen` command as above.

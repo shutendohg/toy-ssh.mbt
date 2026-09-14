@@ -71,7 +71,7 @@ library package importing x/crypto and our wire package, with an alias:
 ```
 import {
   "moonbitlang/x/crypto" @xcrypto,
-  "moonbitlang/x/codec/base64",
+  "moonbitlang/core/encoding/base64",
   "shutendohg/toy-ssh/wire",
 }
 ```
@@ -207,6 +207,33 @@ little-endian byte arrays**.
 - Socket tests (`net/`) fail inside a write-restricted sandbox with
   `TcpServer::new(): Operation not permitted`; run them unsandboxed. macOS has no `timeout`
   command, so bound `ssh` with `-o ConnectTimeout` instead.
+
+More quirks found in M3:
+
+- **`method` is a reserved word.** docs/01's suggested `Request(user, service, method)` does
+  not compile; `auth` uses `auth_method`. `sealed` is reserved too.
+- `moonbitlang/core/strconv` is **empty** in this toolchain — there is no library integer
+  parser, so the client parses its `-p` port by hand.
+- `@sys.exit(n)` returns `Unit`, not a bottom type, so it cannot stand where a value is
+  expected. A generic helper whose body ends in `abort` works:
+  `fn[T] usage_error(msg : String) -> T { println(msg); @sys.exit(2); abort(msg) }`.
+- `println` goes through C stdio and is **fully buffered when standard output is a file or a
+  pipe** — a long-running server writes nothing until it exits. Write diagnostics to
+  standard error through `@stdio.stderr.write` (`net.log` does this), which also frees
+  standard output for a remote command's own output.
+- **`@ascii.encode` calls `panic()` on any code unit above 0x7f**, and a panic is not
+  catchable — it aborts the process, so `run_forever(allow_failure=true)` cannot contain it.
+  Never hand it peer-controlled text (a user name, a banner, a DISCONNECT description, a host
+  name): use `@utf8.encode`. Reserve `@ascii.encode` for constants such as the SSH
+  identification string.
+- Deprecations seen: `Map::new()` → `Map([])`, `Map::size` → `length`, `ArrayView::to_array`
+  → `to_owned`, `StringView::to_string` → `to_owned`. `String::trim` takes `char_set~`
+  (`line.trim(char_set=" \t\r\n")`), not a positional argument.
+- A lambda passed where a concrete function type is expected may still need its parameter
+  annotated (`(k_s : Bytes) => …`) or inference fails with "Type _/0 has no method
+  op_as_view".
+- A synchronous callback held by a sans-IO layer (the transport's `accept_host_key`) cannot
+  log through an async writer. Queue the lines and drain them from the async side.
 
 ## 7. Common pitfalls checklist (SSH-specific, MoonBit-flavored)
 

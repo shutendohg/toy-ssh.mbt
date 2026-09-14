@@ -105,6 +105,12 @@ receive encrypted packets. `net/` async adapter added so the binaries can actual
 
 ## M3 — User authentication
 
+**Status: done (2026-09-15).** All three acceptance criteria verified: in-memory
+client/server for password and publickey (success and every failure path), the publickey
+signed-data blob pinned byte-exactly, and OpenSSH_10.2p1 interop in both directions
+(`ssh` → toy server with publickey and with password, plus a refused wrong password; toy
+client → `sshd -ddd` with publickey, logging `Accepted publickey`).
+
 **Deliverable:** `auth/` client+server for `password` and `publickey`, plus `keys/` parsing
 (`openssh-key-v1`, `authorized_keys`).
 

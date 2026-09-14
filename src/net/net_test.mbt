@@ -83,3 +83,57 @@ async test "random_bytes returns the requested length and is not constant" {
   assert_eq(b.length(), 32)
   assert_not_eq(a, b)
 }
+
+///|
+async test "text files: read, append, and existence" {
+  let dir = @env.get_env_var("TMPDIR").unwrap_or("/tmp")
+  let path = dir + "/toy_ssh_net_test.txt"
+  @fs.write_file(path, b"first\n")
+  inspect(@net.read_text_file(path), content="first\n")
+  @net.append_text_file(path, "second\n")
+  inspect(@net.read_text_file(path), content="first\nsecond\n")
+  assert_true(@net.file_exists(path))
+  assert_false(@net.file_exists(path + ".missing"))
+  // Appending to a file that does not exist yet creates it: the client's
+  // first-ever known_hosts write depends on this, so do not pre-create it.
+  let fresh = dir + "/toy_ssh_net_test_fresh.txt"
+  if @fs.exists(fresh) {
+    @fs.remove(fresh)
+  }
+  @net.append_text_file(fresh, "only\n")
+  inspect(@net.read_text_file(fresh), content="only\n")
+}
+
+///|
+async test "log and append accept non-ASCII text" {
+  // Peer-controlled strings reach both: the server logs the user name from
+  // USERAUTH_REQUEST, the client logs the server's banner, and a
+  // known_hosts line may name a non-ASCII host. `@ascii.encode` panics on
+  // any code unit above 0x7f, which would be a remote crash.
+  @net.log("toy-ssh test: 日本語 ユーザー ✓")
+  let dir = @env.get_env_var("TMPDIR").unwrap_or("/tmp")
+  let path = dir + "/toy_ssh_net_utf8.txt"
+  if @fs.exists(path) {
+    @fs.remove(path)
+  }
+  @net.append_text_file(path, "ホスト ssh-ed25519 AAAA\n")
+  inspect(@net.read_text_file(path), content="ホスト ssh-ed25519 AAAA\n")
+}
+
+///|
+async test "append_line: keeps entries on separate lines" {
+  let dir = @env.get_env_var("TMPDIR").unwrap_or("/tmp")
+  let path = dir + "/toy_ssh_net_append_line.txt"
+  // A file whose last line has no terminator must not be spliced into.
+  @fs.write_file(path, b"first")
+  @net.append_line(path, "second")
+  inspect(@net.read_text_file(path), content="first\nsecond\n")
+  @net.append_line(path, "third")
+  inspect(@net.read_text_file(path), content="first\nsecond\nthird\n")
+  // A missing file gets no leading blank line.
+  if @fs.exists(path) {
+    @fs.remove(path)
+  }
+  @net.append_line(path, "only")
+  inspect(@net.read_text_file(path), content="only\n")
+}

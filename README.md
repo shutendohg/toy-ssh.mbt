@@ -17,8 +17,8 @@ against OpenSSH in both directions.
 | M0 — wire codec, plaintext packets, version exchange, KEXINIT | done |
 | M1 — Poly1305, X25519, Ed25519 (self-built, RFC vectors) | done |
 | M2 — key exchange + encrypted transport (OpenSSH interop, kex only) | done |
-| M3 — user authentication | next |
-| M4 — session channel: `exec` + non-PTY `shell` | planned |
+| M3 — user authentication (`publickey` + `password`, OpenSSH interop) | done |
+| M4 — session channel: `exec` + non-PTY `shell` | next |
 
 ## Layout
 
