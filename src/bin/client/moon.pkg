@@ -1,0 +1,13 @@
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/socket",
+  "moonbitlang/core/env",
+  "moonbitlang/core/encoding/hex",
+  "moonbitlang/x/sys",
+  "shutendohg/toy-ssh/net",
+  "shutendohg/toy-ssh/transport",
+}
+
+supported_targets = "+native"
+
+pkgtype(kind: "executable")
