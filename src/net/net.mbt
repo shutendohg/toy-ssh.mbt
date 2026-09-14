@@ -16,6 +16,26 @@ pub async fn random_bytes(n : Int) -> Bytes {
 }
 
 ///|
+/// Whole-file text read. Key files, `authorized_keys` and `known_hosts`
+/// are all small enough to slurp; the parsers in `keys/` work on the text.
+pub async fn read_text_file(path : String) -> String {
+  @fs.read_file(path).text()
+}
+
+///|
+/// Append `text` to a file, creating it if needed. Used for the client's
+/// trust-on-first-use known_hosts update.
+pub async fn append_text_file(path : String, text : String) -> Unit {
+  @fs.write_file(path, @ascii.encode(text), append=true, create_mode=OpenOrCreate)
+}
+
+///|
+/// Whether `path` exists.
+pub async fn file_exists(path : String) -> Bool {
+  @fs.exists(path)
+}
+
+///|
 /// Random padding filler for production packets (RFC 4253 section 6:
 /// padding SHOULD be random). Uses a per-call chacha8 generator seeded from
 /// `seed` so the synchronous `fill` callback needs no IO.

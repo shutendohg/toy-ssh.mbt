@@ -83,3 +83,20 @@ async test "random_bytes returns the requested length and is not constant" {
   assert_eq(b.length(), 32)
   assert_not_eq(a, b)
 }
+
+///|
+async test "text files: read, append, and existence" {
+  let dir = @env.get_env_var("TMPDIR").unwrap_or("/tmp")
+  let path = dir + "/toy_ssh_net_test.txt"
+  @fs.write_file(path, b"first\n")
+  inspect(@net.read_text_file(path), content="first\n")
+  @net.append_text_file(path, "second\n")
+  inspect(@net.read_text_file(path), content="first\nsecond\n")
+  assert_true(@net.file_exists(path))
+  assert_false(@net.file_exists(path + ".missing"))
+  // Appending to a file that does not exist yet creates it.
+  let fresh = dir + "/toy_ssh_net_test_fresh.txt"
+  @fs.write_file(fresh, b"")
+  @net.append_text_file(fresh, "only\n")
+  inspect(@net.read_text_file(fresh), content="only\n")
+}
