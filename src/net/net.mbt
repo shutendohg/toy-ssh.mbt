@@ -1,0 +1,89 @@
+///|
+/// The IO adapter (docs/01 "The IO adapter"). This is the only package
+/// that touches sockets, files or randomness. It pumps bytes between a
+/// `@socket.Tcp` and a sans-IO `@transport.Transport` and hands events
+/// to a callback.
+///
+/// Toy code. Never use for real security.
+
+///|
+/// `n` bytes from `/dev/urandom`. Opened per call; the toy does not keep a
+/// long-lived handle.
+pub async fn random_bytes(n : Int) -> Bytes {
+  let f = @fs.open("/dev/urandom", mode=ReadOnly)
+  defer f.close()
+  f.read_exactly_at(n, position=0)
+}
+
+///|
+/// Random padding filler for production packets (RFC 4253 section 6:
+/// padding SHOULD be random). Uses a per-call chacha8 generator seeded from
+/// `seed` so the synchronous `fill` callback needs no IO.
+fn random_fill(seed : Bytes) -> (Int) -> Bytes {
+  let rng = @random.Rand::chacha8(seed~)
+  n => Bytes::makei(n, _ => rng.uint(limit=256).to_byte())
+}
+
+///|
+/// A client `TransportConfig` with fresh randomness.
+pub async fn client_config(
+  accept_host_key~ : (Bytes) -> Bool,
+) -> @transport.TransportConfig {
+  let r = random_bytes(16 + 32 + 32)
+  {
+    role: Client,
+    cookie: r[0:16].to_owned(),
+    ephemeral_scalar: r[16:48].to_owned(),
+    host_seed: None,
+    fill: random_fill(r[48:80].to_owned()),
+    accept_host_key,
+  }
+}
+
+///|
+/// A server `TransportConfig` with fresh randomness and the given 32-byte
+/// Ed25519 host key seed.
+pub async fn server_config(host_seed~ : Bytes) -> @transport.TransportConfig {
+  let r = random_bytes(16 + 32 + 32)
+  {
+    role: Server,
+    cookie: r[0:16].to_owned(),
+    ephemeral_scalar: r[16:48].to_owned(),
+    host_seed: Some(host_seed),
+    fill: random_fill(r[48:80].to_owned()),
+    accept_host_key: _ => true,
+  }
+}
+
+///|
+/// Drive `t` over `conn` until the transport closes or the peer hangs up:
+/// write whatever is queued, read, feed, dispatch events, repeat. A single
+/// task owns both directions of the socket, which satisfies the
+/// one-reader / one-writer rule of `moonbitlang/async`.
+pub async fn run(
+  conn : @socket.Tcp,
+  t : @transport.Transport,
+  on_event : (@transport.Transport, @transport.TransportEvent) -> Unit,
+) -> Unit {
+  let buf = FixedArray::make(16384, b'\x00')
+  flush(conn, t)
+  while !t.is_closed() {
+    let n = conn.read(buf)
+    if n == 0 {
+      break
+    }
+    let chunk = Bytes::makei(n, i => buf[i])
+    for ev in t.on_received(chunk[:]) {
+      on_event(t, ev)
+    }
+    flush(conn, t)
+  }
+}
+
+///|
+async fn flush(conn : @socket.Tcp, t : @transport.Transport) -> Unit {
+  let out = t.take_outgoing()
+  if out.length() > 0 {
+    conn.write(out)
+  }
+}
