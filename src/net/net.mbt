@@ -22,8 +22,13 @@ pub async fn random_bytes(n : Int) -> Bytes {
 /// output is a file or a pipe: a long-running server would show nothing
 /// until it exited. Diagnostics also belong on standard error so that a
 /// remote command's output can own standard output verbatim.
+///
+/// Encoded as UTF-8, not ASCII: log lines carry peer-controlled text (a
+/// user name from USERAUTH_REQUEST, a server banner, a DISCONNECT
+/// description), and `@ascii.encode` *panics* above 0x7f — which no
+/// `catch` can contain, so one packet would kill the process.
 pub async fn log(line : String) -> Unit {
-  @stdio.stderr.write(@ascii.encode(line + "\n"))
+  @stdio.stderr.write(@utf8.encode(line + "\n"))
 }
 
 ///|
@@ -39,10 +44,27 @@ pub async fn read_text_file(path : String) -> String {
 pub async fn append_text_file(path : String, text : String) -> Unit {
   @fs.write_file(
     path,
-    @ascii.encode(text),
+    @utf8.encode(text),
     append=true,
     create_mode=OpenOrCreate,
   )
+}
+
+///|
+/// Append `line` as its own line, adding a leading newline when the file
+/// does not already end with one.
+///
+/// A hand-edited or third-party-written file may lack a final newline;
+/// appending straight onto it would splice two entries into one corrupt
+/// line, which the strict parsers then refuse for good.
+pub async fn append_line(path : String, line : String) -> Unit {
+  let existing = if @fs.exists(path) { read_text_file(path) } else { "" }
+  let prefix = if existing.length() > 0 && !existing.has_suffix("\n") {
+    "\n"
+  } else {
+    ""
+  }
+  append_text_file(path, prefix + line + "\n")
 }
 
 ///|

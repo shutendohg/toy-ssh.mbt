@@ -229,9 +229,9 @@ async fn main {
   drain()
   if learned is Some(public) && authenticated {
     // Only remember a host we actually finished talking to.
-    @net.append_text_file(
+    @net.append_line(
       opts.known_hosts_path,
-      @keys.format_known_hosts_line(pattern, public[:]) + "\n",
+      @keys.format_known_hosts_line(pattern, public[:]),
     )
     @net.log("toy-ssh client: added \{pattern} to \{opts.known_hosts_path}")
   }

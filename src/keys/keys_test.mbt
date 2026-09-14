@@ -607,9 +607,12 @@ test "known_hosts: rejects hashed host patterns and malformed lines" {
   expect_err(
     "|1|F1E1+abc=|def= ssh-ed25519 AAAA\n", "Unsupported(\"known_hosts line 1: hashed host patterns (|1|...) are not supported\")",
   )
-  expect_err(
-    good + "\nexample.com ssh-rsa AAAAB3NzaC1yc2E=\n",
-    "Unsupported(\"known_hosts line 2: expected type \\\"ssh-ed25519\\\", got \\\"ssh-rsa\\\"\")",
+  // A line for another key type is skipped rather than failing the file
+  // (see "other key types are skipped, markers are refused"); only the
+  // Ed25519 entry survives.
+  inspect(
+    @keys.parse_known_hosts(good + "\nexample.com ssh-rsa AAAAB3NzaC1yc2E=\n").length(),
+    content="1",
   )
   expect_err(
     "example.com ssh-ed25519\n", "BadFormat(\"known_hosts line 1: expected <host> ssh-ed25519 <base64>\")",
@@ -690,4 +693,51 @@ test "known_hosts: wildcard and negated patterns are refused, not left unmatchab
   // A plain pattern still parses.
   let ok = @keys.parse_known_hosts("[127.0.0.1]:2200 ssh-ed25519 \{b64}\n")
   inspect(ok.length(), content="1")
+}
+
+///|
+test "known_hosts: other key types are skipped, markers are refused" {
+  let b64 = "AAAAC3NzaC1lZDI1NTE5AAAAIFMnJJyZjlxlJrspqvLDVH5xBzT5+GrXwznTe6FPQOen"
+  // A real known_hosts holds other algorithms for unrelated hosts, and for
+  // the same host. Skipping them is what OpenSSH does and cannot hide a
+  // changed Ed25519 key: a host with only an RSA entry reads as unknown.
+  let body =
+    #|other.example ssh-rsa AAAAB3NzaC1yc2EAAAA
+    #|[127.0.0.1]:2200 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY
+    #|[127.0.0.1]:2200 ssh-ed25519 REPLACED
+    #|
+  let entries = @keys.parse_known_hosts(body.replace(old="REPLACED", new=b64))
+  inspect(entries.length(), content="1")
+  debug_inspect(
+    @keys.check_known_host(
+      entries[:],
+      "[127.0.0.1]:2200",
+      @hex.decode(
+        "5327249c998e5c6526bb29aaf2c3547e710734f9f86ad7c339d37ba14f40e7a7",
+      )[:],
+    ),
+    content="Trusted",
+  )
+  // A host whose only entry is another algorithm is unknown, not trusted.
+  let rsa_only = @keys.parse_known_hosts("only.example ssh-rsa AAAAB3Nz\n")
+  inspect(rsa_only.length(), content="0")
+  // Markers must not be skipped: silently dropping @revoked would let a
+  // revoked key through as a first-time connection.
+  for marker in ["@revoked", "@cert-authority"] {
+    try
+      @keys.parse_known_hosts("\{marker} h.example ssh-ed25519 \{b64}\n")
+    catch {
+      Unsupported(_) => ()
+      e => fail("expected Unsupported for \{marker}, got \{Repr(e)}")
+    } noraise {
+      _ => fail("expected parse_known_hosts to refuse \{marker}")
+    }
+  }
+  // A malformed ssh-ed25519 line still fails the file.
+  try @keys.parse_known_hosts("h.example ssh-ed25519 not_base64!!\n") catch {
+    BadFormat(_) => ()
+    e => fail("expected BadFormat, got \{Repr(e)}")
+  } noraise {
+    _ => fail("expected parse_known_hosts to refuse a bad base64 key")
+  }
 }

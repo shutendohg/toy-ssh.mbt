@@ -221,6 +221,11 @@ More quirks found in M3:
   pipe** — a long-running server writes nothing until it exits. Write diagnostics to
   standard error through `@stdio.stderr.write` (`net.log` does this), which also frees
   standard output for a remote command's own output.
+- **`@ascii.encode` calls `panic()` on any code unit above 0x7f**, and a panic is not
+  catchable — it aborts the process, so `run_forever(allow_failure=true)` cannot contain it.
+  Never hand it peer-controlled text (a user name, a banner, a DISCONNECT description, a host
+  name): use `@utf8.encode`. Reserve `@ascii.encode` for constants such as the SSH
+  identification string.
 - Deprecations seen: `Map::new()` → `Map([])`, `Map::size` → `length`, `ArrayView::to_array`
   → `to_owned`, `StringView::to_string` → `to_owned`. `String::trim` takes `char_set~`
   (`line.trim(char_set=" \t\r\n")`), not a positional argument.

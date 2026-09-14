@@ -52,9 +52,14 @@ pub fn format_known_hosts_line(pattern : String, public : BytesView) -> String {
 /// half-understand would silently downgrade a changed host key to
 /// "unknown", which is the one outcome we must never produce.
 ///
-/// Hashed host patterns (`|1|...`) are rejected explicitly — the toy does
-/// not implement them, and treating them as opaque host names would make
-/// every hashed entry silently unmatchable.
+/// Hashed host patterns (`|1|...`), markers (`@revoked`,
+/// `@cert-authority`) and wildcard or negated host patterns are rejected
+/// explicitly — the toy does not implement them, and treating them as
+/// ordinary entries would make them silently unmatchable, which for
+/// `@revoked` would be a fail-open. Lines for **other key types** are
+/// skipped instead: a real `known_hosts` is full of RSA and ECDSA entries
+/// for unrelated hosts, and a host with only a foreign-type entry reads as
+/// `Unknown`, which is what OpenSSH does too.
 pub fn parse_known_hosts(body : String) -> Array[KnownHost] raise KeyError {
   let entries = []
   for numbered in significant_lines(body) {
@@ -63,6 +68,15 @@ pub fn parse_known_hosts(body : String) -> Array[KnownHost] raise KeyError {
     if line.has_prefix("|") {
       raise Unsupported(
         "\{ctx}: hashed host patterns (|1|...) are not supported",
+      )
+    }
+    // Markers must never be skipped the way a foreign key type is below:
+    // dropping an `@revoked` line would let a revoked key through as a
+    // first-time connection, and `@cert-authority` changes what the line
+    // means entirely.
+    if line.has_prefix("@") {
+      raise Unsupported(
+        "\{ctx}: line markers (@revoked, @cert-authority) are not supported",
       )
     }
     let (patterns, rest) = split_field(line[:])
@@ -86,6 +100,16 @@ pub fn parse_known_hosts(body : String) -> Array[KnownHost] raise KeyError {
         }
       }
       hosts.push(pattern.to_owned())
+    }
+    // A line for another key type is skipped, not an error: a real
+    // known_hosts holds RSA and ECDSA entries for unrelated hosts, and
+    // failing the file on them would make it unusable. Skipping cannot
+    // hide a changed Ed25519 key — a host with only a foreign-type entry
+    // reads as `Unknown`, exactly as OpenSSH treats a key type it has no
+    // entry for.
+    let (type_name, _) = split_field(rest)
+    if type_name != ed25519_algorithm {
+      continue
     }
     // Reuse the type / base64 / blob checks; a known_hosts line has no
     // comment field, so anything after the base64 is ignored the way
