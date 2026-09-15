@@ -1,0 +1,130 @@
+// Child processes for a session channel (docs/04 Part B). These spawn real
+// processes and so need to run outside a write-restricted sandbox.
+
+///|
+/// Run `command` to completion, collecting stdout and stderr.
+async fn run_collect(command : String?) -> (Int, Bytes, Bytes) {
+  let out = @buffer.Buffer(size_hint=256)
+  let err = @buffer.Buffer(size_hint=64)
+  let status = @async.with_task_group(group => {
+    let child = @net.spawn_session(
+      group,
+      command,
+      chunk => out.write_bytes(chunk),
+      chunk => err.write_bytes(chunk),
+    )
+    child.close_stdin()
+    child.wait()
+  })
+  (status, out.to_bytes(), err.to_bytes())
+}
+
+///|
+async test "exec: stdout and a zero status" {
+  let (status, out, err) = run_collect(Some("echo hello"))
+  inspect(status, content="0")
+  assert_eq(out, b"hello\n")
+  inspect(err.length(), content="0")
+}
+
+///|
+async test "exec: the command's exit status is reported" {
+  // The shape of docs/06 M4 acceptance 2.
+  let (status, out, _) = run_collect(Some("echo hello; exit 3"))
+  inspect(status, content="3")
+  assert_eq(out, b"hello\n")
+}
+
+///|
+async test "exec: stdout and stderr stay separate" {
+  let (status, out, err) = run_collect(Some("echo out; echo err >&2"))
+  inspect(status, content="0")
+  assert_eq(out, b"out\n")
+  assert_eq(err, b"err\n")
+}
+
+///|
+async test "exec: output is binary-safe" {
+  // A remote command may emit anything; nothing may decode it as text.
+  let (status, out, _) = run_collect(Some("printf '\\377\\376\\000A'"))
+  inspect(status, content="0")
+  inspect(@hex.encode(out[:]), content="fffe0041")
+}
+
+///|
+async test "exec: a large output arrives complete" {
+  // Catches a pump that assumes the whole stream fits one read.
+  let (status, out, _) = run_collect(Some("seq 1 20000"))
+  inspect(status, content="0")
+  let mut lines = 0
+  for b in out {
+    if b == b'\n' {
+      lines = lines + 1
+    }
+  }
+  inspect(lines, content="20000")
+  inspect(out.length(), content="108894")
+}
+
+///|
+async test "exec: standard input is delivered in order" {
+  let out = @buffer.Buffer(size_hint=64)
+  let status = @async.with_task_group(group => {
+    let child = @net.spawn_session(
+      group,
+      Some("cat"),
+      chunk => out.write_bytes(chunk),
+      _ => (),
+    )
+    child.write_stdin(b"first\n")
+    child.write_stdin(b"second\n")
+    child.close_stdin()
+    child.wait()
+  })
+  inspect(status, content="0")
+  assert_eq(out.to_bytes(), b"first\nsecond\n")
+}
+
+///|
+async test "shell: the login shell runs commands from standard input" {
+  let out = @buffer.Buffer(size_hint=64)
+  let status = @async.with_task_group(group => {
+    let child = @net.spawn_session(
+      group,
+      None,
+      chunk => out.write_bytes(chunk),
+      _ => (),
+    )
+    child.write_stdin(b"echo shell-ok\n")
+    child.close_stdin()
+    child.wait()
+  })
+  inspect(status, content="0")
+  assert_eq(out.to_bytes(), b"shell-ok\n")
+}
+
+///|
+async test "writing after the child exited is ignored, and close_stdin is idempotent" {
+  // A client that keeps sending standard input after the command finished
+  // is normal (`ssh host true < big-file`); the write must not fail the
+  // connection, and it must not kill this process with SIGPIPE.
+  let status = @async.with_task_group(group => {
+    let child = @net.spawn_session(group, Some("true"), _ => (), _ => ())
+    let status = child.wait()
+    child.write_stdin(b"ignored")
+    child.close_stdin()
+    child.close_stdin()
+    child.write_stdin(b"also ignored")
+    status
+  })
+  inspect(status, content="0")
+}
+
+///|
+async test "pid is reported for logs" {
+  @async.with_task_group(group => {
+    let child = @net.spawn_session(group, Some("true"), _ => (), _ => ())
+    assert_true(child.pid() > 0)
+    ignore(child.wait())
+  })
+}

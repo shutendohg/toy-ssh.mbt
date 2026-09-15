@@ -104,7 +104,7 @@ pub async fn[X] spawn_session(
   )
   group.spawn_bg(() => pump(our_stdout, on_stdout))
   group.spawn_bg(() => pump(our_stderr, on_stderr))
-  { proc, stdin: our_stdin, stdin_closed: Ref(false) }
+  { proc, stdin: our_stdin, stdin_closed: Ref(false), }
 }
 
 ///|
