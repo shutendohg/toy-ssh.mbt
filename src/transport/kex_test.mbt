@@ -452,7 +452,7 @@ fn dance(i_c : Bytes, i_s : Bytes) -> (Bytes, Bytes, Bytes, Bytes) raise {
     k_s~,
     q_c=init.q_c,
     q_s~,
-    k_mpint=k_srv,
+    k_encoded=k_srv,
   )
   let signature = @transport.sign_exchange_hash(
     @crypto.Ed25519KeyPair::from_seed(host_seed[:]),
@@ -473,7 +473,7 @@ fn dance(i_c : Bytes, i_s : Bytes) -> (Bytes, Bytes, Bytes, Bytes) raise {
     k_s=reply.k_s,
     q_c~,
     q_s=reply.q_s,
-    k_mpint=k_cli,
+    k_encoded=k_cli,
   )
   (h_srv, h_cli, reply.k_s, reply.signature)
 }
@@ -629,4 +629,79 @@ test "derive_session_keys: pinned C/D keys from the fixed-input dance" {
   assert_eq(keys.recv_key(Client), keys.d)
   assert_eq(keys.send_key(Server), keys.d)
   assert_eq(keys.recv_key(Server), keys.c)
+}
+
+///|
+test "kex methods: the advertised names map to implementations" {
+  // Until now the negotiated kex name was stored and never used: X25519
+  // was wired in directly. A second method needs a real dispatch point.
+  guard @transport.kex_method(@transport.KEX_CURVE25519_SHA256) is Some(a) else {
+    fail("curve25519-sha256 must be supported")
+  }
+  debug_inspect(a, content="Curve25519")
+  guard @transport.kex_method(@transport.KEX_CURVE25519_SHA256_LIBSSH)
+    is Some(b) else {
+    fail("the @libssh.org alias must be supported")
+  }
+  debug_inspect(b, content="Curve25519")
+  // A name we do not implement, and the strict-kex marker, are not methods.
+  assert_true(@transport.kex_method("diffie-hellman-group14-sha256") is None)
+  assert_true(@transport.kex_method(@transport.KEX_STRICT_CLIENT) is None)
+  // Every name we advertise must map to something we can run.
+  let ki = @transport.KexInit::for_role(Client, cookie=Bytes::make(16, b'\x11'))
+  for name in ki.kex_algorithms {
+    if name != @transport.KEX_STRICT_CLIENT {
+      assert_true(@transport.kex_method(name) is Some(_))
+    }
+  }
+}
+
+///|
+test "kex dispatch: curve25519 through the dispatch matches the direct calls" {
+  let c_scalar = @hex.decode(
+    "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+  )
+  let s_scalar = @hex.decode(
+    "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+  )
+  let kex = @transport.Curve25519
+  // The client's blob is still just Q_C.
+  let q_c = @transport.kex_client_public(kex, c_scalar[:])
+  assert_eq(q_c, @transport.ecdh_public(c_scalar[:]))
+  // The server answers with its blob and the encoded shared secret.
+  let (q_s, k_server) = @transport.kex_server_exchange(kex, s_scalar[:], q_c[:])
+  assert_eq(q_s, @transport.ecdh_public(s_scalar[:]))
+  // For curve25519 the encoding is the wire mpint, as before.
+  let raw = @transport.shared_secret(s_scalar[:], q_c[:])
+  assert_eq(k_server, @transport.shared_secret_mpint(raw[:]))
+  // The client derives the same encoded secret from the server's blob.
+  let k_client = @transport.kex_client_shared(kex, c_scalar[:], q_s[:])
+  assert_eq(k_client, k_server)
+}
+
+///|
+test "kex dispatch: a malformed peer blob is a protocol error" {
+  let scalar = @hex.decode(
+    "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+  )
+  for bad in [b"", b"\x09", Bytes::make(33, b'\x09'), Bytes::make(32, b'\x00')] {
+    try
+      ignore(
+        @transport.kex_server_exchange(@transport.Curve25519, scalar[:], bad[:]),
+      )
+    catch {
+      ProtocolError(_) => ()
+    } noraise {
+      _ => fail("expected a ProtocolError for a \{bad.length()}-byte blob")
+    }
+    try
+      ignore(
+        @transport.kex_client_shared(@transport.Curve25519, scalar[:], bad[:]),
+      )
+    catch {
+      ProtocolError(_) => ()
+    } noraise {
+      _ => fail("expected a ProtocolError for a \{bad.length()}-byte blob")
+    }
+  }
 }

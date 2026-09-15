@@ -212,6 +212,78 @@ pub fn KexEcdhReply::decode(
 }
 
 // ---------------------------------------------------------------------------
+// Key exchange methods
+// ---------------------------------------------------------------------------
+
+///|
+/// A key exchange method: how the two `KEX_ECDH` blobs are built and how
+/// the shared secret `K` is derived from them.
+///
+/// This is the seam the design called for in docs/02: everything above it
+/// (the exchange hash, the signature, key derivation) is identical for
+/// every method, so a new method plugs in here without touching the
+/// transport state machine. Note that `K` comes out of these functions
+/// **already wire-encoded**, because the encoding is part of the method:
+/// `curve25519-sha256` feeds an `mpint`, while the ML-KEM hybrid feeds a
+/// `string` (see docs/02).
+pub(all) enum KexMethod {
+  /// `curve25519-sha256` and its `@libssh.org` alias: X25519, `mpint(K)`.
+  Curve25519
+} derive(Debug, Eq)
+
+///|
+/// The method a negotiated kex name selects, or `None` for a name we do
+/// not implement. The strict-kex markers are not methods.
+pub fn kex_method(name : String) -> KexMethod? {
+  match name {
+    KEX_CURVE25519_SHA256 | KEX_CURVE25519_SHA256_LIBSSH => Some(Curve25519)
+    _ => None
+  }
+}
+
+///|
+/// Client side: the blob that goes in `KEX_ECDH_INIT`.
+pub fn kex_client_public(
+  kex : KexMethod,
+  ephemeral_scalar : BytesView,
+) -> Bytes {
+  match kex {
+    Curve25519 => ecdh_public(ephemeral_scalar)
+  }
+}
+
+///|
+/// Server side: answer the client's blob with our own and the encoded
+/// shared secret. A malformed blob is the peer's fault.
+pub fn kex_server_exchange(
+  kex : KexMethod,
+  ephemeral_scalar : BytesView,
+  client_blob : BytesView,
+) -> (Bytes, Bytes) raise ProtocolError {
+  match kex {
+    Curve25519 => {
+      let raw = shared_secret(ephemeral_scalar, client_blob)
+      (ecdh_public(ephemeral_scalar), shared_secret_mpint(raw[:]))
+    }
+  }
+}
+
+///|
+/// Client side: the encoded shared secret, from the server's blob.
+pub fn kex_client_shared(
+  kex : KexMethod,
+  ephemeral_scalar : BytesView,
+  server_blob : BytesView,
+) -> Bytes raise ProtocolError {
+  match kex {
+    Curve25519 => {
+      let raw = shared_secret(ephemeral_scalar, server_blob)
+      shared_secret_mpint(raw[:])
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Ed25519 host key and signature blobs (docs/02 section 5, RFC 8709)
 // ---------------------------------------------------------------------------
 
@@ -331,7 +403,9 @@ pub fn shared_secret_mpint(k_raw : BytesView) -> Bytes {
 /// H = SHA256(string(V_C) || string(V_S) || string(I_C) || string(I_S)
 ///            || string(K_S) || string(Q_C) || string(Q_S) || mpint(K)).
 /// `v_c` / `v_s` are the version strings without CR LF; `i_c` / `i_s` are
-/// the full KEXINIT payloads; `k_mpint` is the wire mpint from
+/// the full KEXINIT payloads; `k_encoded` is the wire-encoded shared
+/// secret from the negotiated method (an `mpint` for curve25519, a
+/// `string` for the ML-KEM hybrid) — see
 /// `shared_secret_mpint` and is appended as-is.
 pub fn exchange_hash(
   v_c~ : Bytes,
@@ -341,7 +415,7 @@ pub fn exchange_hash(
   k_s~ : Bytes,
   q_c~ : Bytes,
   q_s~ : Bytes,
-  k_mpint~ : Bytes,
+  k_encoded~ : Bytes,
 ) -> Bytes {
   let w = @wire.Writer::new(size_hint=512)
   w.write_string(v_c[:])
@@ -351,7 +425,7 @@ pub fn exchange_hash(
   w.write_string(k_s[:])
   w.write_string(q_c[:])
   w.write_string(q_s[:])
-  w.write_raw(k_mpint[:])
+  w.write_raw(k_encoded[:])
   @crypto.fixed_to_bytes(@xcrypto.sha256(w.to_bytes()))
 }
 
@@ -389,11 +463,11 @@ pub fn verify_exchange_hash(
 ///|
 /// K1 = HASH(K || H || X || session_id), K2 = HASH(K || H || K1),
 /// K3 = HASH(K || H || K1 || K2), ...; the concatenation truncated to
-/// `len` bytes. `k_mpint` is the full wire mpint of the shared secret
+/// `len` bytes. `k_encoded` is the wire-encoded shared secret
 /// (length prefix included) as produced by `shared_secret_mpint`;
 /// `letter` is the ASCII key letter 'A'..'F'.
 pub fn derive_key(
-  k_mpint : BytesView,
+  k_encoded : BytesView,
   h : BytesView,
   session_id : BytesView,
   letter : Byte,
@@ -401,9 +475,9 @@ pub fn derive_key(
 ) -> Bytes {
   guard len >= 0 else { abort("derive_key: negative length") }
   let seed = @wire.Writer::new(
-    size_hint=k_mpint.length() + h.length() + 1 + session_id.length(),
+    size_hint=k_encoded.length() + h.length() + 1 + session_id.length(),
   )
-  seed.write_raw(k_mpint)
+  seed.write_raw(k_encoded)
   seed.write_raw(h)
   seed.write_byte(letter)
   seed.write_raw(session_id)
@@ -412,9 +486,9 @@ pub fn derive_key(
   out.write_raw(block[:])
   while out.length() < len {
     let next = @wire.Writer::new(
-      size_hint=k_mpint.length() + h.length() + out.length(),
+      size_hint=k_encoded.length() + h.length() + out.length(),
     )
-    next.write_raw(k_mpint)
+    next.write_raw(k_encoded)
     next.write_raw(h)
     next.write_raw(out.to_bytes()[:])
     block = @crypto.fixed_to_bytes(@xcrypto.sha256(next.to_bytes()))
@@ -443,13 +517,13 @@ pub const CHACHA20_POLY1305_KEY_LEN : Int = 64
 /// Derive the C and D keys. On the first (and, for us, only) key exchange
 /// `session_id` equals `h`.
 pub fn derive_session_keys(
-  k_mpint : BytesView,
+  k_encoded : BytesView,
   h : BytesView,
   session_id : BytesView,
 ) -> SessionKeys {
   {
-    c: derive_key(k_mpint, h, session_id, b'C', CHACHA20_POLY1305_KEY_LEN),
-    d: derive_key(k_mpint, h, session_id, b'D', CHACHA20_POLY1305_KEY_LEN),
+    c: derive_key(k_encoded, h, session_id, b'C', CHACHA20_POLY1305_KEY_LEN),
+    d: derive_key(k_encoded, h, session_id, b'D', CHACHA20_POLY1305_KEY_LEN),
   }
 }
 

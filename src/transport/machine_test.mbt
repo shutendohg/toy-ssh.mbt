@@ -172,7 +172,7 @@ test "self-interop: exchange hash matches the kex fixture inputs" {
     k_s~,
     q_c~,
     q_s~,
-    k_mpint=@transport.shared_secret_mpint(k[:]),
+    k_encoded=@transport.shared_secret_mpint(k[:]),
   )
   assert_eq(session_id, h)
 }
@@ -357,7 +357,7 @@ test "non-strict peer: IGNORE during kex is skipped and seqnums carry over" {
     k_s=reply.k_s,
     q_c=@transport.ecdh_public(scalar[:]),
     q_s=reply.q_s,
-    k_mpint=@transport.shared_secret_mpint(k[:]),
+    k_encoded=@transport.shared_secret_mpint(k[:]),
   )
   let keys = @transport.derive_session_keys(
     @transport.shared_secret_mpint(k[:])[:],

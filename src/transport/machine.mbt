@@ -178,6 +178,20 @@ pub fn Transport::is_closed(self : Transport) -> Bool {
 }
 
 ///|
+/// The key exchange method the negotiation settled on. `negotiate` only
+/// ever returns a name we advertise, and every name we advertise maps to a
+/// method (pinned by a test), so a missing one is our bug, not the peer's.
+fn Transport::kex_method(self : Transport) -> KexMethod {
+  guard self.negotiated is Some(n) else {
+    abort("Transport: key exchange before negotiation")
+  }
+  match kex_method(n.kex) {
+    Some(k) => k
+    None => abort("Transport: negotiated an unimplemented kex \{n.kex}")
+  }
+}
+
+///|
 /// Whether strict kex was negotiated (both markers present). False until
 /// the peer's KEXINIT has been seen.
 pub fn Transport::strict_kex(self : Transport) -> Bool {
@@ -388,7 +402,9 @@ fn Transport::on_kexinit(
   self.negotiated = Some(negotiated)
   self.state = KexWait
   if self.cfg.role == Client {
-    let init : KexEcdhInit = { q_c: ecdh_public(self.cfg.ephemeral_scalar[:]), }
+    let init : KexEcdhInit = {
+      q_c: kex_client_public(self.kex_method(), self.cfg.ephemeral_scalar[:]),
+    }
     self.send_plain(init.encode())
   }
 }
@@ -400,9 +416,11 @@ fn Transport::on_ecdh_init(
   payload : Bytes,
 ) -> Unit raise ProtocolError {
   let init = KexEcdhInit::decode(payload[:])
-  let q_s = ecdh_public(self.cfg.ephemeral_scalar[:])
-  let k_raw = shared_secret(self.cfg.ephemeral_scalar[:], init.q_c[:])
-  let k_mpint = shared_secret_mpint(k_raw[:])
+  let (q_s, k_encoded) = kex_server_exchange(
+    self.kex_method(),
+    self.cfg.ephemeral_scalar[:],
+    init.q_c[:],
+  )
   guard self.host_key is Some(host_key) else {
     abort("server without host key")
   }
@@ -415,7 +433,7 @@ fn Transport::on_ecdh_init(
     k_s~,
     q_c=init.q_c,
     q_s~,
-    k_mpint~,
+    k_encoded~,
   )
   let reply : KexEcdhReply = {
     k_s,
@@ -423,7 +441,7 @@ fn Transport::on_ecdh_init(
     signature: sign_exchange_hash(host_key, h[:]),
   }
   self.send_plain(reply.encode())
-  self.finish_kex(k_mpint, h)
+  self.finish_kex(k_encoded, h)
 }
 
 ///|
@@ -437,9 +455,13 @@ fn Transport::on_ecdh_reply(
   if !(self.cfg.accept_host_key)(reply.k_s) {
     raise ProtocolError("host key rejected")
   }
-  let q_c = ecdh_public(self.cfg.ephemeral_scalar[:])
-  let k_raw = shared_secret(self.cfg.ephemeral_scalar[:], reply.q_s[:])
-  let k_mpint = shared_secret_mpint(k_raw[:])
+  let kex = self.kex_method()
+  let q_c = kex_client_public(kex, self.cfg.ephemeral_scalar[:])
+  let k_encoded = kex_client_shared(
+    kex,
+    self.cfg.ephemeral_scalar[:],
+    reply.q_s[:],
+  )
   let h = exchange_hash(
     v_c=@ascii.encode(OUR_VERSION),
     v_s=self.peer_version,
@@ -448,16 +470,20 @@ fn Transport::on_ecdh_reply(
     k_s=reply.k_s,
     q_c~,
     q_s=reply.q_s,
-    k_mpint~,
+    k_encoded~,
   )
   verify_exchange_hash(reply.k_s[:], h[:], reply.signature[:])
-  self.finish_kex(k_mpint, h)
+  self.finish_kex(k_encoded, h)
 }
 
 ///|
 /// Derive keys, send NEWKEYS and switch our send side to the record layer.
-fn Transport::finish_kex(self : Transport, k_mpint : Bytes, h : Bytes) -> Unit {
-  let keys = derive_session_keys(k_mpint[:], h[:], h[:])
+fn Transport::finish_kex(
+  self : Transport,
+  k_encoded : Bytes,
+  h : Bytes,
+) -> Unit {
+  let keys = derive_session_keys(k_encoded[:], h[:], h[:])
   self.session_id = Some(h)
   self.keys = Some(keys)
   self.send_plain(Bytes::make(1, SSH_MSG_NEWKEYS))
