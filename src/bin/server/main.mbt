@@ -1,7 +1,7 @@
 ///|
-/// Toy SSH server, M3 scope: key exchange, then `publickey` and `password`
-/// user authentication. Once a user is authenticated the connection ends,
-/// because the connection protocol (channels, exec, shell) is M4.
+/// Toy SSH server: key exchange, `publickey` and `password` user
+/// authentication, then one `session` channel running `exec` or a non-PTY
+/// `shell`.
 ///
 /// ```
 /// server [--listen 127.0.0.1:2222]
@@ -27,6 +27,14 @@ fn[T] usage_error(message : String) -> T {
   @sys.exit(2)
   abort(message)
 }
+
+///|
+/// What we advertise for the session channel: a 2 MiB window and a 32 KiB
+/// maximum packet, the sizes docs/04 Part B suggests.
+const CHANNEL_WINDOW : UInt = 2097152
+
+///|
+const CHANNEL_MAX_PACKET : UInt = 32768
 
 ///|
 /// What the server was told on the command line.
@@ -77,14 +85,20 @@ async fn main {
   server.run_forever(allow_failure=true) <| ((conn, peer) => {
     defer conn.close()
     @net.log("[\{peer}] connected")
-    serve(conn, peer, host_seed, authorized, passwords)
+    // Each connection owns a task group: the socket reader and writer, and
+    // the child process's output pumps, all live in it.
+    @async.with_task_group(group => {
+      serve(group, conn, peer, host_seed, authorized, passwords)
+    })
     @net.log("[\{peer}] closed")
   })
 }
 
 ///|
-/// Run one connection: transport handshake, then userauth.
-async fn serve(
+/// Run one connection: transport handshake, userauth, then one session
+/// channel.
+async fn[X] serve(
+  group : @async.TaskGroup[X],
   conn : @socket.Tcp,
   peer : @socket.Addr,
   host_seed : Bytes,
@@ -92,9 +106,13 @@ async fn serve(
   passwords : Map[String, String],
 ) -> Unit {
   let t = @transport.Transport::new(@net.server_config(host_seed~))
+  let c = @net.Conn::new(conn, t)
   // Created on Established, when the session id exists.
   let mut auth : @auth.AuthServer? = None
-  @net.run(conn, t, (t, ev) => {
+  // Created once the user is authenticated and asks for a session.
+  let mut session : @connection.ServerSession? = None
+  let mut child : @net.Child? = None
+  c.run(group, (c, ev) => {
     match ev {
       Established(session_id~) => {
         @net.log(
@@ -125,7 +143,17 @@ async fn serve(
           }),
         )
       }
-      Packet(payload~) => handle_packet(t, peer, auth, payload)
+      Packet(payload~) =>
+        if auth is Some(a) && a.is_authenticated() {
+          match handle_connection(group, c, peer, a, session, child, payload) {
+            (s2, ch2) => {
+              session = s2
+              child = ch2
+            }
+          }
+        } else {
+          handle_userauth(c, peer, auth, payload)
+        }
       Disconnect(code~, description~, by_peer~) =>
         @net.log(
           "[\{peer}] disconnect code=\{code} \"\{description}\" by_peer=\{by_peer}",
@@ -135,10 +163,10 @@ async fn serve(
 }
 
 ///|
-/// One decrypted payload from the peer: the service request, then
-/// everything the userauth layer owns.
-async fn handle_packet(
-  t : @transport.Transport,
+/// One decrypted payload before the user is authenticated: the service
+/// request, then everything the userauth layer owns.
+async fn handle_userauth(
+  c : @net.Conn,
   peer : @socket.Addr,
   auth : @auth.AuthServer?,
   payload : Bytes,
@@ -151,31 +179,20 @@ async fn handle_packet(
   if payload[0] == @transport.SSH_MSG_SERVICE_REQUEST {
     let service = @transport.decode_service_request(payload[:]) catch {
       e => {
-        t.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, "\{Repr(e)}")
+        c.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, "\{Repr(e)}")
         return
       }
     }
     if service == @transport.SERVICE_USERAUTH {
       @net.log("[\{peer}] service request \{service}: accepted")
-      t.send_packet(@transport.encode_service_accept(service)[:])
+      c.send(@transport.encode_service_accept(service)[:])
     } else {
       @net.log("[\{peer}] service request \{service}: refused")
-      t.disconnect(
+      c.disconnect(
         @transport.SSH_DISCONNECT_SERVICE_NOT_AVAILABLE,
         "service not available",
       )
     }
-    return
-  }
-  if auth.is_authenticated() {
-    // The connection protocol is M4; say so instead of going silent.
-    @net.log(
-      "[\{peer}] message \{payload[0].to_int()} after authentication: the connection protocol is M4",
-    )
-    t.disconnect(
-      @transport.SSH_DISCONNECT_BY_APPLICATION,
-      "toy-ssh: the connection protocol is not implemented yet (M4)",
-    )
     return
   }
   for ev in auth.on_payload(payload[:]) {
@@ -187,19 +204,123 @@ async fn handle_packet(
       Authenticated(user~) => @net.log("[\{peer}] authenticated \{user}")
       TooManyFailures(user~) => {
         @net.log("[\{peer}] too many failures for \{user}, disconnecting")
-        t.disconnect(
+        c.disconnect(
           @transport.SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
           "too many authentication failures",
         )
       }
       ProtocolViolation(msg) => {
         @net.log("[\{peer}] userauth protocol violation: \{msg}")
-        t.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, msg)
+        c.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, msg)
       }
     }
   }
   for out in auth.take_outgoing() {
-    t.send_packet(out[:])
+    c.send(out[:])
+  }
+}
+
+///|
+/// One decrypted payload after authentication: the connection protocol.
+/// Returns the session and child, which are created lazily when the peer
+/// opens a channel and asks to run something.
+async fn[X] handle_connection(
+  group : @async.TaskGroup[X],
+  c : @net.Conn,
+  peer : @socket.Addr,
+  auth : @auth.AuthServer,
+  session : @connection.ServerSession?,
+  child : @net.Child?,
+  payload : Bytes,
+) -> (@connection.ServerSession?, @net.Child?) {
+  let s = match session {
+    Some(s) => s
+    None =>
+      @connection.ServerSession::new(
+        window_size=CHANNEL_WINDOW,
+        max_packet_size=CHANNEL_MAX_PACKET,
+      )
+  }
+  let mut running = child
+  let events = s.on_payload(payload[:]) catch {
+    ConnectionError(msg) => {
+      @net.log("[\{peer}] connection protocol error: \{msg}")
+      c.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, msg)
+      return (Some(s), running)
+    }
+  }
+  for ev in events {
+    match ev {
+      ExecRequest(command) => {
+        @net.log(
+          "[\{peer}] exec \{Repr(command)} as \{auth.user().unwrap_or("?")}",
+        )
+        running = Some(start_child(group, c, peer, s, Some(command)))
+      }
+      ShellRequest => {
+        @net.log("[\{peer}] shell as \{auth.user().unwrap_or("?")}")
+        running = Some(start_child(group, c, peer, s, None))
+      }
+      Stdin(data) =>
+        match running {
+          Some(ch) => ch.write_stdin(data[:])
+          // Data before a request: nothing is running to receive it.
+          None => ()
+        }
+      StdinEof =>
+        match running {
+          Some(ch) => ch.close_stdin()
+          None => ()
+        }
+      Closed => @net.log("[\{peer}] channel closed")
+    }
+  }
+  for out in s.take_outgoing() {
+    c.send(out[:])
+  }
+  (Some(s), running)
+}
+
+///|
+/// Spawn the command and, in a third task, wait for it and report its exit
+/// status. The output pumps queue channel data through the session; the
+/// connection's writer task is what actually puts it on the socket.
+async fn[X] start_child(
+  group : @async.TaskGroup[X],
+  c : @net.Conn,
+  peer : @socket.Addr,
+  s : @connection.ServerSession,
+  command : String?,
+) -> @net.Child {
+  let child = @net.spawn_session(
+    group,
+    command,
+    chunk => {
+      s.send_stdout(chunk[:])
+      flush(c, s)
+    },
+    chunk => {
+      s.send_stderr(chunk[:])
+      flush(c, s)
+    },
+  )
+  group.spawn_bg(() => {
+    let status = child.wait()
+    // A child killed by a signal reports a negative value, which is not a
+    // valid exit status; report it the way a shell does.
+    let code = if status < 0 { 128 - status } else { status }
+    @net.log("[\{peer}] pid \{child.pid()} exited with \{status}")
+    s.finish(exit_status=code.reinterpret_as_uint())
+    flush(c, s)
+  })
+  child
+}
+
+///|
+/// Hand whatever the session has queued to the connection's writer.
+fn flush(c : @net.Conn, s : @connection.ServerSession) -> Unit {
+  for out in s.take_outgoing() {
+    c.send(out[:])
   }
 }
 

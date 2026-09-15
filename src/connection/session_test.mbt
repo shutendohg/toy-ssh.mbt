@@ -250,3 +250,79 @@ test "a pty request is refused, and an unknown global request is answered" {
   inspect(s.on_payload(g2[:]).length(), content="0")
   inspect(s.take_outgoing().length(), content="0")
 }
+
+///|
+test "ordering: EOF and the exit status never overtake queued data" {
+  // A real interop failure: with data waiting for window credit, an EOF
+  // queued afterwards went out first, and the peer then rejected the data
+  // that followed as arriving after EOF.
+  let c = @connection.ClientSession::new(window_size=4096, max_packet_size=128)
+  let s = @connection.ServerSession::new(window_size=10, max_packet_size=128)
+  c.request_exec("cat")
+  ignore(pump(c, s))
+  // 25 bytes of stdin against a 10-byte window, then EOF straight away.
+  c.send_stdin(Bytes::make(25, b'x'))
+  c.send_eof()
+  let first = c.take_outgoing()
+  // Only data fits now; the EOF must still be queued.
+  debug_inspect(first.map(p => p[0].to_int()), content="[94]")
+  ignore(
+    c.on_payload(
+      @connection.encode_channel_window_adjust(
+        recipient_channel=0,
+        bytes_to_add=100,
+      )[:],
+    ),
+  )
+  let rest = c.take_outgoing()
+  // The remaining data, then EOF last.
+  inspect(rest.length(), content="2")
+  inspect(rest[0][0].to_int(), content="94")
+  inspect(rest[1][0].to_int(), content="96")
+}
+
+///|
+test "ordering: the server's exit status and close follow its last output" {
+  let c = @connection.ClientSession::new(window_size=10, max_packet_size=128)
+  let s = @connection.ServerSession::new(window_size=4096, max_packet_size=128)
+  c.request_exec("seq 1 100")
+  ignore(pump(c, s))
+  s.send_stdout(Bytes::make(25, b'o'))
+  s.finish(exit_status=0)
+  let first = s.take_outgoing()
+  inspect(first.length(), content="1")
+  inspect(first[0][0].to_int(), content="94")
+  ignore(
+    s.on_payload(
+      @connection.encode_channel_window_adjust(
+        recipient_channel=0,
+        bytes_to_add=100,
+      )[:],
+    ),
+  )
+  let rest = s.take_outgoing()
+  // data, then exit-status (98), EOF (96), CLOSE (97).
+  debug_inspect(rest.map(p => p[0].to_int()), content="[94, 98, 96, 97]")
+}
+
+///|
+test "ordering: flow control is never blocked behind our own data" {
+  // A WINDOW_ADJUST stuck behind data that is itself waiting for credit
+  // would deadlock both sides. It goes out on the priority lane.
+  let c = @connection.ClientSession::new(window_size=100, max_packet_size=128)
+  let s = @connection.ServerSession::new(window_size=100, max_packet_size=128)
+  c.request_exec("cat")
+  ignore(pump(c, s))
+  // Exhaust the server's credit so its own output is stuck.
+  s.send_stdout(Bytes::make(500, b'o'))
+  ignore(s.take_outgoing())
+  // The client now sends enough to owe the server a WINDOW_ADJUST.
+  c.send_stdin(Bytes::make(80, b'i'))
+  for p in c.take_outgoing() {
+    ignore(s.on_payload(p[:]))
+  }
+  let out = s.take_outgoing()
+  // The adjust is there even though the server's own data is blocked.
+  inspect(out.length(), content="1")
+  inspect(out[0][0].to_int(), content="93")
+}

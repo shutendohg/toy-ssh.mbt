@@ -28,12 +28,19 @@ const EXTENDED_DATA_OVERHEAD : UInt = 13
 const MIN_MAX_PACKET : UInt = 64
 
 ///|
-/// A queued byte stream waiting for window credit, and its data type:
-/// stdout goes out as CHANNEL_DATA, stderr as CHANNEL_EXTENDED_DATA.
-struct Pending {
-  data : Bytes
+/// One item of the ordered outgoing stream.
+///
+/// Data waits for window credit, and anything queued behind it has to wait
+/// too: EOF means "no more data", so letting it overtake queued data makes
+/// the peer reject the data that follows. Flow control and request replies
+/// do *not* belong here — see the `priority` lane, which must never be
+/// blocked behind our own data or the two sides can deadlock waiting for
+/// each other's window.
+enum Pending {
   /// `None` for CHANNEL_DATA, `Some(code)` for CHANNEL_EXTENDED_DATA.
-  extended : UInt?
+  Data(data~ : Bytes, extended~ : UInt?)
+  /// EOF, CLOSE or `exit-status`: ordered after the data before it.
+  Control(Bytes)
 }
 
 ///|
@@ -83,47 +90,60 @@ fn Channel::drain(
   queue : Array[Pending],
   out : Array[Bytes],
 ) -> Unit {
-  while !queue.is_empty() && self.send_window > 0 {
-    let head = queue[0]
-    // `maximum_packet_size` caps the whole message, so the header has to
-    // come out of it: sending more than the peer allows risks a
-    // disconnect, while sending less is always legal.
-    let overhead = match head.extended {
-      None => DATA_OVERHEAD
-      Some(_) => EXTENDED_DATA_OVERHEAD
-    }
-    let payload_cap = self.send_max_packet - overhead
-    let room = if self.send_window < payload_cap {
-      self.send_window
-    } else {
-      payload_cap
-    }
-    let take = if head.data.length().reinterpret_as_uint() < room {
-      head.data.length()
-    } else {
-      room.reinterpret_as_int()
-    }
-    if take == 0 {
-      break
-    }
-    let chunk = head.data[0:take]
-    out.push(
-      match head.extended {
-        None =>
-          encode_channel_data(recipient_channel=self.remote_channel, data=chunk)
-        Some(code) =>
-          encode_channel_extended_data(
-            recipient_channel=self.remote_channel,
-            data_type=code,
-            data=chunk,
-          )
-      },
-    )
-    self.send_window = self.send_window - take.reinterpret_as_uint()
-    if take == head.data.length() {
-      queue.remove(0) |> ignore
-    } else {
-      queue[0] = { data: head.data[take:].to_owned(), extended: head.extended, }
+  while !queue.is_empty() {
+    match queue[0] {
+      Control(payload) => {
+        out.push(payload)
+        queue.remove(0) |> ignore
+      }
+      Data(data~, extended~) => {
+        if self.send_window == 0 {
+          return
+        }
+        // `maximum_packet_size` caps the whole message, so the header has
+        // to come out of it: sending more than the peer allows risks a
+        // disconnect, while sending less is always legal.
+        let overhead = match extended {
+          None => DATA_OVERHEAD
+          Some(_) => EXTENDED_DATA_OVERHEAD
+        }
+        let payload_cap = self.send_max_packet - overhead
+        let room = if self.send_window < payload_cap {
+          self.send_window
+        } else {
+          payload_cap
+        }
+        let take = if data.length().reinterpret_as_uint() < room {
+          data.length()
+        } else {
+          room.reinterpret_as_int()
+        }
+        if take == 0 {
+          return
+        }
+        let chunk = data[0:take]
+        out.push(
+          match extended {
+            None =>
+              encode_channel_data(
+                recipient_channel=self.remote_channel,
+                data=chunk,
+              )
+            Some(code) =>
+              encode_channel_extended_data(
+                recipient_channel=self.remote_channel,
+                data_type=code,
+                data=chunk,
+              )
+          },
+        )
+        self.send_window = self.send_window - take.reinterpret_as_uint()
+        if take == data.length() {
+          queue.remove(0) |> ignore
+        } else {
+          queue[0] = Data(data=data[take:].to_owned(), extended~)
+        }
+      }
     }
   }
 }
@@ -332,7 +352,7 @@ pub fn ClientSession::send_stdin(
   if data.length() == 0 {
     return
   }
-  self.queue.push({ data: data.to_owned(), extended: None, })
+  self.queue.push(Data(data=data.to_owned(), extended=None))
 }
 
 ///|
@@ -342,8 +362,10 @@ pub fn ClientSession::send_eof(self : ClientSession) -> Unit {
     return
   }
   self.ch.eof_sent = true
-  self.outgoing.push(
-    encode_channel_eof(recipient_channel=self.ch.remote_channel),
+  // Queued behind any data still waiting for window credit: EOF means "no
+  // more data", so overtaking it makes the peer reject what follows.
+  self.queue.push(
+    Control(encode_channel_eof(recipient_channel=self.ch.remote_channel)),
   )
 }
 
@@ -564,7 +586,7 @@ pub fn ServerSession::send_stdout(
   if data.length() == 0 {
     return
   }
-  self.queue.push({ data: data.to_owned(), extended: None, })
+  self.queue.push(Data(data=data.to_owned(), extended=None))
 }
 
 ///|
@@ -576,10 +598,9 @@ pub fn ServerSession::send_stderr(
   if data.length() == 0 {
     return
   }
-  self.queue.push({
-    data: data.to_owned(),
-    extended: Some(SSH_EXTENDED_DATA_STDERR),
-  })
+  self.queue.push(
+    Data(data=data.to_owned(), extended=Some(SSH_EXTENDED_DATA_STDERR)),
+  )
 }
 
 ///|
@@ -591,23 +612,26 @@ pub fn ServerSession::finish(self : ServerSession, exit_status~ : UInt) -> Unit 
     return
   }
   self.finished = true
-  self.ch.drain(self.queue, self.outgoing)
-  self.outgoing.push(
-    encode_exit_status_request(
-      recipient_channel=self.ch.remote_channel,
-      exit_status~,
+  // All three are queued behind whatever output is still waiting for
+  // window credit, so the peer never sees them before the last byte.
+  self.queue.push(
+    Control(
+      encode_exit_status_request(
+        recipient_channel=self.ch.remote_channel,
+        exit_status~,
+      ),
     ),
   )
   if !self.ch.eof_sent {
     self.ch.eof_sent = true
-    self.outgoing.push(
-      encode_channel_eof(recipient_channel=self.ch.remote_channel),
+    self.queue.push(
+      Control(encode_channel_eof(recipient_channel=self.ch.remote_channel)),
     )
   }
   if !self.ch.close_sent {
     self.ch.close_sent = true
-    self.outgoing.push(
-      encode_channel_close(recipient_channel=self.ch.remote_channel),
+    self.queue.push(
+      Control(encode_channel_close(recipient_channel=self.ch.remote_channel)),
     )
   }
 }
