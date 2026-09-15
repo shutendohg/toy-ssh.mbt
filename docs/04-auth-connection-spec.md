@@ -244,7 +244,13 @@ that path is clean.
   remaining window drops below half. Never send DATA that exceeds the peer's advertised window
   or `maximum_packet_size` — and note that `maximum_packet_size` caps the **whole message**,
   so subtract the header (9 bytes for DATA, 13 for EXTENDED_DATA) from the payload you put in
-  one message.
+  one message. Also cap it yourself: the transport rejects an SSH packet over 35000 bytes
+  (doc 02 §2), so a peer advertising a 4 GiB `maximum_packet_size` must not be able to turn a
+  megabyte of output into one message. Keep the whole connection message at or below the
+  32768 you advertise.
+- **A channel-addressed message needs a channel.** Refuse `CHANNEL_REQUEST`, `CHANNEL_DATA`,
+  `CHANNEL_WINDOW_ADJUST`, `CHANNEL_EOF` and `CHANNEL_CLOSE` that arrive before
+  `CHANNEL_OPEN`, rather than treating channel 0 as implicitly present.
 
 ### Closing & exit status
 

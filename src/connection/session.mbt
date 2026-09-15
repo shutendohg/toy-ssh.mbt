@@ -28,6 +28,16 @@ const EXTENDED_DATA_OVERHEAD : UInt = 13
 const MIN_MAX_PACKET : UInt = 64
 
 ///|
+/// The largest connection message we will build, whatever the peer
+/// advertises.
+///
+/// The transport caps a whole SSH packet at 35000 bytes and treats a
+/// payload beyond that as a programmer error, so trusting a peer's
+/// `maximum_packet_size` would let it push us over that limit: an
+/// advertised 4 GiB turned a megabyte of output into one message.
+const MAX_CHANNEL_MESSAGE : UInt = 32768
+
+///|
 /// One item of the ordered outgoing stream.
 ///
 /// Data waits for window credit, and anything queued behind it has to wait
@@ -107,7 +117,12 @@ fn Channel::drain(
           None => DATA_OVERHEAD
           Some(_) => EXTENDED_DATA_OVERHEAD
         }
-        let payload_cap = self.send_max_packet - overhead
+        let limit = if self.send_max_packet < MAX_CHANNEL_MESSAGE {
+          self.send_max_packet
+        } else {
+          MAX_CHANNEL_MESSAGE
+        }
+        let payload_cap = limit - overhead
         let room = if self.send_window < payload_cap {
           self.send_window
         } else {
@@ -210,6 +225,20 @@ fn check_channel(channel : UInt, ctx : String) -> Unit raise ConnectionError {
   if channel != LOCAL_CHANNEL {
     raise ConnectionError("\{ctx}: no channel \{channel}")
   }
+}
+
+///|
+/// The same check plus "a channel exists at all": a channel-addressed
+/// message before CHANNEL_OPEN names something that was never created.
+fn check_open_channel(
+  opened : Bool,
+  channel : UInt,
+  ctx : String,
+) -> Unit raise ConnectionError {
+  if !opened {
+    raise ConnectionError("\{ctx}: no channel has been opened")
+  }
+  check_channel(channel, ctx)
 }
 
 ///|
@@ -687,7 +716,7 @@ pub fn ServerSession::on_payload(
     }
     SSH_MSG_CHANNEL_REQUEST => {
       let req = decode_channel_request(payload)
-      check_channel(req.recipient_channel, "CHANNEL_REQUEST")
+      check_open_channel(self.opened, req.recipient_channel, "CHANNEL_REQUEST")
       let accepted = match req.request {
         // docs/04: refuse a second exec or shell on the same channel.
         Exec(command) if !self.started => {
@@ -715,7 +744,7 @@ pub fn ServerSession::on_payload(
     }
     SSH_MSG_CHANNEL_DATA => {
       let (channel, data) = decode_channel_data(payload)
-      check_channel(channel, "CHANNEL_DATA")
+      check_open_channel(self.opened, channel, "CHANNEL_DATA")
       self.ch.check_not_after_eof("CHANNEL_DATA")
       if self.ch.consume(data.length()) is Some(adjust) {
         self.outgoing.push(adjust)
@@ -724,16 +753,24 @@ pub fn ServerSession::on_payload(
     }
     SSH_MSG_CHANNEL_WINDOW_ADJUST => {
       let (channel, add) = decode_channel_window_adjust(payload)
-      check_channel(channel, "CHANNEL_WINDOW_ADJUST")
+      check_open_channel(self.opened, channel, "CHANNEL_WINDOW_ADJUST")
       self.ch.grant(add)
     }
     SSH_MSG_CHANNEL_EOF => {
-      check_channel(decode_channel_eof(payload), "CHANNEL_EOF")
+      check_open_channel(
+        self.opened,
+        decode_channel_eof(payload),
+        "CHANNEL_EOF",
+      )
       self.ch.eof_received = true
       events.push(StdinEof)
     }
     SSH_MSG_CHANNEL_CLOSE => {
-      check_channel(decode_channel_close(payload), "CHANNEL_CLOSE")
+      check_open_channel(
+        self.opened,
+        decode_channel_close(payload),
+        "CHANNEL_CLOSE",
+      )
       self.ch.close_received = true
       if !self.ch.close_sent {
         self.ch.close_sent = true

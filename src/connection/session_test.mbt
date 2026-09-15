@@ -326,3 +326,75 @@ test "ordering: flow control is never blocked behind our own data" {
   inspect(out.length(), content="1")
   inspect(out[0][0].to_int(), content="93")
 }
+
+///|
+test "a peer advertising an absurd window and packet size cannot make us overrun the transport" {
+  // The transport caps a whole SSH packet at 35000 bytes and aborts if a
+  // payload exceeds it, so a connection message must stay under that no
+  // matter what the peer advertises.
+  let s = @connection.ServerSession::new(
+    window_size=4096,
+    max_packet_size=32768,
+  )
+  let open = @connection.encode_channel_open(
+    channel_type="session",
+    sender_channel=0,
+    initial_window_size=0xffffffff,
+    maximum_packet_size=0xffffffff,
+  )
+  ignore(s.on_payload(open[:]))
+  ignore(
+    s.on_payload(
+      @connection.encode_exec_request(
+        recipient_channel=0,
+        command="yes",
+        want_reply=true,
+      )[:],
+    ),
+  )
+  ignore(s.take_outgoing())
+  // One megabyte of output, far more than any single packet may carry.
+  s.send_stdout(Bytes::make(1048576, b'o'))
+  let out = s.take_outgoing()
+  assert_true(out.length() > 1)
+  let mut total = 0
+  for p in out {
+    // Every message fits a 35000-byte SSH packet with room for the
+    // transport's own framing.
+    assert_true(p.length() <= 32768)
+    let (_, data) = @connection.decode_channel_data(p[:])
+    total = total + data.length()
+  }
+  inspect(total, content="1048576")
+}
+
+///|
+test "the server refuses channel messages before the channel is open" {
+  // Every channel-addressed message needs a channel. Accepting these
+  // before CHANNEL_OPEN let a peer ask for exec without ever opening one.
+  for
+    payload in [
+      @connection.encode_exec_request(
+        recipient_channel=0,
+        command="true",
+        want_reply=true,
+      ),
+      @connection.encode_channel_window_adjust(
+        recipient_channel=0,
+        bytes_to_add=1,
+      ),
+      @connection.encode_channel_data(recipient_channel=0, data=b"x"),
+      @connection.encode_channel_eof(recipient_channel=0),
+      @connection.encode_channel_close(recipient_channel=0),
+    ] {
+    let s = @connection.ServerSession::new(
+      window_size=4096,
+      max_packet_size=32768,
+    )
+    try s.on_payload(payload[:]) catch {
+      ConnectionError(_) => ()
+    } noraise {
+      _ => fail("expected a ConnectionError for message \{payload[0].to_int()}")
+    }
+  }
+}
