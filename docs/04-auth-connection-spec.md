@@ -230,13 +230,21 @@ that path is clean.
   (client→server) and stdout (server→client).
 - `SSH_MSG_CHANNEL_EXTENDED_DATA (95)`: `uint32 recipient_channel || uint32 data_type_code ||
   string data`. `data_type_code = 1` (`SSH_EXTENDED_DATA_STDERR`) carries stderr.
+- **Message ordering:** `CHANNEL_DATA`, `CHANNEL_EOF`, `CHANNEL_CLOSE` and the `exit-status`
+  request form **one ordered stream**. Queue them together: an EOF that overtakes data still
+  waiting for window credit makes the peer reject the data that follows (it arrived "after
+  EOF"). `CHANNEL_WINDOW_ADJUST` and request replies must **not** be in that queue — a
+  window grant stuck behind our own blocked data deadlocks both sides, each waiting for the
+  other's window.
 - **Windowing:** each side may send at most `window` bytes of channel data before the peer
   replenishes it. Sending `len` bytes of DATA decrements the peer's window you track by `len`.
   When you (as receiver) have consumed data, send `SSH_MSG_CHANNEL_WINDOW_ADJUST (93)`
   (`uint32 recipient_channel || uint32 bytes_to_add`) to grant more. A simple correct policy:
   start with a 2 MiB window and send a WINDOW_ADJUST of the consumed amount whenever the
   remaining window drops below half. Never send DATA that exceeds the peer's advertised window
-  or `maximum_packet_size`.
+  or `maximum_packet_size` — and note that `maximum_packet_size` caps the **whole message**,
+  so subtract the header (9 bytes for DATA, 13 for EXTENDED_DATA) from the payload you put in
+  one message.
 
 ### Closing & exit status
 

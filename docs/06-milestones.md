@@ -134,6 +134,12 @@ publickey signature build+verify → OpenSSH interop.
 
 ## M4 — Connection layer: exec + simple shell (the end-to-end goal)
 
+**Status: done (2026-09-16).** All four acceptance criteria verified against
+OpenSSH_10.2p1: `ssh -T … 'echo hello; exit 3'` prints `hello` and exits 3; a piped
+`pwd`/`echo`/`exit 5` runs through the non-PTY shell and exits 5; the toy client runs a
+command on a real `sshd` and exits with its status; and the in-memory client/server exec
+round trip covers stdout, stderr, `exit-status` and the dual CLOSE.
+
 **Deliverable:** `connection/` with one `session` channel supporting `exec` and non-PTY
 `shell`, wired through `net/` and `moonbitlang/async`'s `process` for child processes. Both
 binaries fully functional.
