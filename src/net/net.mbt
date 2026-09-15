@@ -114,39 +114,135 @@ pub async fn server_config(host_seed~ : Bytes) -> @transport.TransportConfig {
 }
 
 ///|
-/// Drive `t` over `conn` until the transport closes or the peer hangs up:
-/// write whatever is queued, read, feed, dispatch events, repeat. A single
-/// task owns both directions of the socket, which satisfies the
-/// one-reader / one-writer rule of `moonbitlang/async`.
-pub async fn run(
-  conn : @socket.Tcp,
-  t : @transport.Transport,
-  on_event : async (@transport.Transport, @transport.TransportEvent) -> Unit,
-) -> Unit {
-  let buf = FixedArray::make(16384, b'\x00')
-  flush(conn, t)
-  while !t.is_closed() {
-    let n = conn.read(buf)
-    if n == 0 {
-      break
-    }
-    let chunk = Bytes::makei(n, i => buf[i])
-    for ev in t.on_received(chunk[:]) {
-      on_event(t, ev)
-      // A handler may have closed the transport; the rest of the batch is
-      // moot then (the transport itself already stopped producing events).
-      if t.is_closed() && !(ev is Disconnect(..)) {
-        break
-      }
-    }
-    flush(conn, t)
+/// One connection: a transport plus the socket it runs over, driven by two
+/// tasks — one reads the socket and dispatches events, one owns every
+/// write.
+///
+/// Two tasks are needed because a `session` channel has two independent
+/// sources of outgoing traffic: the peer's packets (answered from the read
+/// loop) and a child process's output (produced by its own pump). Only the
+/// writer task ever touches the socket's write side, which is what
+/// `moonbitlang/async` requires; everyone else queues through the
+/// transport and wakes the writer.
+pub struct Conn {
+  socket : @socket.Tcp
+  transport : @transport.Transport
+  /// Counts pending flushes. A semaphore rather than a condition variable
+  /// because `release` before `acquire` still counts, so a wake-up cannot
+  /// be lost and the writer cannot park with bytes queued.
+  wake : @semaphore.Semaphore
+  mut stopped : Bool
+}
+
+///|
+pub fn Conn::new(
+  socket : @socket.Tcp,
+  transport : @transport.Transport,
+) -> Conn {
+  {
+    socket,
+    transport,
+    wake: @semaphore.Semaphore(1024, initial_value=0),
+    stopped: false,
   }
 }
 
 ///|
-async fn flush(conn : @socket.Tcp, t : @transport.Transport) -> Unit {
-  let out = t.take_outgoing()
-  if out.length() > 0 {
-    conn.write(out)
+/// The transport, for state queries such as `session_id`.
+pub fn Conn::transport(self : Conn) -> @transport.Transport {
+  self.transport
+}
+
+///|
+/// Queue an encrypted payload for the peer and wake the writer. Safe from
+/// any task.
+pub fn Conn::send(self : Conn, payload : BytesView) -> Unit {
+  self.transport.send_packet(payload)
+  self.notify()
+}
+
+///|
+/// Wake the writer, unless it has already gone. The semaphore aborts once
+/// its value reaches its size, so releasing with no consumer left would
+/// eventually kill the process rather than just the connection.
+fn Conn::notify(self : Conn) -> Unit {
+  if self.stopped {
+    return
+  }
+  self.wake.release()
+}
+
+///|
+/// Disconnect on our own initiative, making sure the DISCONNECT is
+/// actually written before the connection winds down.
+pub fn Conn::disconnect(self : Conn, code : UInt, description : String) -> Unit {
+  self.transport.disconnect(code, description)
+  self.notify()
+}
+
+///|
+/// Ask the read loop to finish, without sending anything.
+pub fn Conn::stop(self : Conn) -> Unit {
+  self.stopped = true
+  self.wake.release()
+}
+
+///|
+/// Run the connection: spawn the writer into `group`, then read until the
+/// transport closes or the peer hangs up. Returns once the read side is
+/// done; the writer flushes what is left and exits.
+pub async fn[X] Conn::run(
+  self : Conn,
+  group : @async.TaskGroup[X],
+  on_event : async (Conn, @transport.TransportEvent) -> Unit,
+) -> Unit {
+  // Kept as a task we wait on: returning before the writer has flushed
+  // would let the caller close the socket with the last packet — usually a
+  // DISCONNECT — still queued.
+  let writer = group.spawn(() => self.write_loop())
+  let buf = FixedArray::make(16384, b'\x00')
+  // The version line and our KEXINIT are queued by `Transport::new`.
+  self.wake.release()
+  while !self.stopped && !self.transport.is_closed() {
+    let n = self.socket.read(buf)
+    if n == 0 {
+      break
+    }
+    let chunk = Bytes::makei(n, i => buf[i])
+    for ev in self.transport.on_received(chunk[:]) {
+      on_event(self, ev)
+      // A handler may have closed the transport; the rest of the batch is
+      // moot then (the transport itself already stopped producing events).
+      if self.transport.is_closed() && !(ev is Disconnect(..)) {
+        break
+      }
+    }
+    self.wake.release()
+  }
+  // Let the writer flush anything still queued, then wait for it to exit.
+  self.stopped = true
+  self.wake.release()
+  writer.wait()
+}
+
+///|
+/// The only task that writes the socket.
+async fn Conn::write_loop(self : Conn) -> Unit {
+  while true {
+    self.wake.acquire()
+    let out = self.transport.take_outgoing()
+    if out.length() > 0 {
+      self.socket.write(out) catch {
+        // The peer is gone. Say so before leaving, so nothing keeps
+        // waking a writer that no longer exists.
+        _ => {
+          self.stopped = true
+          break
+        }
+      }
+    }
+    if self.stopped {
+      break
+    }
   }
 }

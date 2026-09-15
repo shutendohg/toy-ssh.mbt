@@ -13,7 +13,8 @@ async test "loopback: client and server complete kex and exchange a service requ
       defer conn.close()
       let seed = @net.random_bytes(32)
       let t = @transport.Transport::new(@net.server_config(host_seed=seed))
-      @net.run(conn, t, (t, ev) => {
+      let c = @net.Conn::new(conn, t)
+      c.run(root, (c, ev) => {
         match ev {
           Established(session_id~) =>
             log.push("server established \{session_id.length()}")
@@ -25,7 +26,7 @@ async test "loopback: client and server complete kex and exchange a service requ
               }
             }
             log.push("server got service request \{service}")
-            t.send_packet(@transport.encode_service_accept(service)[:])
+            c.send(@transport.encode_service_accept(service)[:])
           }
           Disconnect(code~, description~, by_peer~) =>
             log.push("server disconnect \{code} \{description} \{by_peer}")
@@ -38,11 +39,12 @@ async test "loopback: client and server complete kex and exchange a service requ
       let t = @transport.Transport::new(
         @net.client_config(accept_host_key=_ => true),
       )
-      @net.run(conn, t, (t, ev) => {
+      let c = @net.Conn::new(conn, t)
+      c.run(root, (c, ev) => {
         match ev {
           Established(session_id~) => {
             log.push("client established \{session_id.length()}")
-            t.send_packet(
+            c.send(
               @transport.encode_service_request(@transport.SERVICE_USERAUTH)[:],
             )
           }
@@ -54,7 +56,7 @@ async test "loopback: client and server complete kex and exchange a service requ
               }
             }
             log.push("client got service accept \{service}")
-            t.disconnect(@transport.SSH_DISCONNECT_BY_APPLICATION, "done")
+            c.disconnect(@transport.SSH_DISCONNECT_BY_APPLICATION, "done")
           }
           Disconnect(code~, description~, by_peer~) =>
             log.push("client disconnect \{code} \{description} \{by_peer}")

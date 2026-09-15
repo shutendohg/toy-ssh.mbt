@@ -235,6 +235,28 @@ More quirks found in M3:
 - A synchronous callback held by a sans-IO layer (the transport's `accept_host_key`) cannot
   log through an async writer. Queue the lines and drain them from the async side.
 
+More quirks found in M4:
+
+- A connection with a child process needs **two tasks** (`moonbitlang/async` allows one
+  reader and one writer per socket): the socket reader dispatching events, and a writer that
+  owns every `write`. Wake the writer with a **semaphore**, not a condition variable —
+  `Semaphore::release` before `acquire` still counts, so a wake-up cannot be lost and the
+  writer cannot park with bytes queued. Wait on the writer task before the read loop returns,
+  or the caller closes the socket with the last packet unsent.
+- A task whose read never ends (this process's standard input on a terminal) must be spawned
+  with `spawn_bg(no_wait=true, …)`, or the task group waits for it forever. The converse also
+  bites: a task group waits for a spawned child process, so cancel the child when the peer
+  disconnects or the connection's socket stays open as long as the command runs.
+- `@semaphore.Semaphore::release` **aborts** once its value reaches the size it was built
+  with. If the consumer can exit (a writer task that breaks on a socket error), stop
+  releasing — otherwise a connection error turns into a process-wide crash.
+- `@process.spawn` puts the waiter in the group you pass, and `read_from_process()` /
+  `write_to_process()` give you the pipe ends. A write to a child that already exited fails
+  with a catchable error rather than a signal, so swallow it: a peer that keeps sending
+  standard input after the command finished is normal.
+- `@stdio.stdout.write` / `@stdio.stderr.write` take bytes and go straight to the fd, which is
+  what a remote command's output needs — never route it through a `String`.
+
 ## 7. Common pitfalls checklist (SSH-specific, MoonBit-flavored)
 
 - [ ] `mpint(K)`: added the leading `0x00` when the top bit is set? (kex hash breaks otherwise)
@@ -245,6 +267,9 @@ More quirks found in M3:
       IV and not a little-endian seqnum? (This is the #1 cipher interop bug — see doc 03 §2.)
 - [ ] Payload counter starts at **1**, Poly1305 key from counter **0**?
 - [ ] Sequence numbers reset to 0 **after NEWKEYS** under strict kex?
+- [ ] Channel data, EOF, CLOSE and `exit-status` queued in **one ordered stream**, with
+      WINDOW_ADJUST and request replies on a separate lane that data cannot block?
+- [ ] Channel payload sized so the **whole message** fits the peer's `maximum_packet_size`?
 - [ ] Publickey signed blob: `string(session_id)` prepended, request bytes **without** the
       final signature field?
 - [ ] Ed25519 private field is 64 bytes (`seed||A`); you feed only the 32-byte **seed** to

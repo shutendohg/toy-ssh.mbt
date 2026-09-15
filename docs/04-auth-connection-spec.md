@@ -230,19 +230,40 @@ that path is clean.
   (client→server) and stdout (server→client).
 - `SSH_MSG_CHANNEL_EXTENDED_DATA (95)`: `uint32 recipient_channel || uint32 data_type_code ||
   string data`. `data_type_code = 1` (`SSH_EXTENDED_DATA_STDERR`) carries stderr.
+- **Message ordering:** `CHANNEL_DATA`, `CHANNEL_EOF`, `CHANNEL_CLOSE` and the `exit-status`
+  request form **one ordered stream**. Queue them together: an EOF that overtakes data still
+  waiting for window credit makes the peer reject the data that follows (it arrived "after
+  EOF"). `CHANNEL_WINDOW_ADJUST` and request replies must **not** be in that queue — a
+  window grant stuck behind our own blocked data deadlocks both sides, each waiting for the
+  other's window.
 - **Windowing:** each side may send at most `window` bytes of channel data before the peer
   replenishes it. Sending `len` bytes of DATA decrements the peer's window you track by `len`.
   When you (as receiver) have consumed data, send `SSH_MSG_CHANNEL_WINDOW_ADJUST (93)`
   (`uint32 recipient_channel || uint32 bytes_to_add`) to grant more. A simple correct policy:
   start with a 2 MiB window and send a WINDOW_ADJUST of the consumed amount whenever the
   remaining window drops below half. Never send DATA that exceeds the peer's advertised window
-  or `maximum_packet_size`.
+  or `maximum_packet_size` — and note that `maximum_packet_size` caps the **whole message**,
+  so subtract the header (9 bytes for DATA, 13 for EXTENDED_DATA) from the payload you put in
+  one message. Also cap it yourself: the transport rejects an SSH packet over 35000 bytes
+  (doc 02 §2), so a peer advertising a 4 GiB `maximum_packet_size` must not be able to turn a
+  megabyte of output into one message. Keep the whole connection message at or below the
+  32768 you advertise.
+- **A channel-addressed message needs a channel.** Refuse `CHANNEL_REQUEST`, `CHANNEL_DATA`,
+  `CHANNEL_WINDOW_ADJUST`, `CHANNEL_EOF` and `CHANNEL_CLOSE` that arrive before
+  `CHANNEL_OPEN`, rather than treating channel 0 as implicitly present. For the same reason,
+  **encode a queued message when you send it, not when you queue it**: the peer's
+  `recipient_channel` is unknown until it confirms the channel, and the client can reach end
+  of its own standard input before that. (Addressing everything to 0 appears to work against
+  OpenSSH only because `sshd` numbers the first session channel 0.)
 
 ### Closing & exit status
 
 Typical teardown (server side, after the process exits):
 
-1. Flush remaining stdout/stderr as DATA/EXTENDED_DATA.
+1. Flush remaining stdout/stderr as DATA/EXTENDED_DATA. **Wait for both output pumps to
+   reach end of file first.** A child is reaped the moment it exits while its pipes may still
+   hold unread bytes, so reporting the status on the process's exit alone races the tail of
+   its own output out of the channel.
 2. Send the exit status as a channel request (no reply):
    ```
    byte      98  SSH_MSG_CHANNEL_REQUEST

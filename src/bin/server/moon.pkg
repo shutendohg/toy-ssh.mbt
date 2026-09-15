@@ -5,6 +5,7 @@ import {
   "moonbitlang/core/env",
   "moonbitlang/x/sys",
   "shutendohg/toy-ssh/auth",
+  "shutendohg/toy-ssh/connection",
   "shutendohg/toy-ssh/keys",
   "shutendohg/toy-ssh/net",
   "shutendohg/toy-ssh/transport",
