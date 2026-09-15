@@ -398,3 +398,60 @@ test "the server refuses channel messages before the channel is open" {
     }
   }
 }
+
+///|
+test "the client holds EOF until the peer's channel id is known" {
+  // Its own standard input can reach end of file before the server
+  // confirms the channel. An EOF built then was addressed to channel 0 and
+  // sent on a channel that did not exist yet; it worked against OpenSSH
+  // only because sshd happens to number the first session 0.
+  let c = @connection.ClientSession::new(window_size=4096, max_packet_size=128)
+  c.request_exec("cat")
+  let open = c.take_outgoing()
+  inspect(open.length(), content="1")
+  c.send_eof()
+  // Nothing may go out yet.
+  inspect(c.take_outgoing().length(), content="0")
+  // The server confirms with its own id 7.
+  ignore(
+    c.on_payload(
+      @connection.encode_channel_open_confirmation(
+        recipient_channel=0,
+        sender_channel=7,
+        initial_window_size=4096,
+        maximum_packet_size=128,
+      )[:],
+    ),
+  )
+  let out = c.take_outgoing()
+  // The exec request, then the EOF, both addressed to channel 7.
+  debug_inspect(out.map(p => p[0].to_int()), content="[98, 96]")
+  inspect(@connection.decode_channel_eof(out[1][:]), content="7")
+}
+
+///|
+test "the client refuses channel messages before the channel is confirmed" {
+  for
+    payload in [
+      @connection.encode_channel_data(recipient_channel=0, data=b"x"),
+      @connection.encode_channel_window_adjust(
+        recipient_channel=0,
+        bytes_to_add=0xffffffff,
+      ),
+      @connection.encode_channel_eof(recipient_channel=0),
+      @connection.encode_channel_close(recipient_channel=0),
+      @connection.encode_channel_success(recipient_channel=0),
+    ] {
+    let c = @connection.ClientSession::new(
+      window_size=4096,
+      max_packet_size=128,
+    )
+    c.request_exec("true")
+    ignore(c.take_outgoing())
+    try c.on_payload(payload[:]) catch {
+      ConnectionError(_) => ()
+    } noraise {
+      _ => fail("expected a ConnectionError for message \{payload[0].to_int()}")
+    }
+  }
+}

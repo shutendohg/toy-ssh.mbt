@@ -128,3 +128,31 @@ async test "pid is reported for logs" {
     ignore(child.wait())
   })
 }
+
+///|
+async test "wait returns only after every byte of output has been delivered" {
+  // The child is reaped as soon as it exits, while its pipe may still hold
+  // unread output. If `wait` returned then, the caller would report the
+  // exit status and close the channel before the tail arrived.
+  let out = @buffer.Buffer(size_hint=400000)
+  @async.with_task_group(group => {
+    let child = @net.spawn_session(
+      group,
+      Some("seq 1 50000; exit 7"),
+      chunk => out.write_bytes(chunk),
+      _ => (),
+    )
+    child.close_stdin()
+    let status = child.wait()
+    // Checked here, not after the group finishes: this is the contract the
+    // server relies on before it sends exit-status, EOF and CLOSE.
+    assert_eq(status, 7)
+    let mut lines = 0
+    for b in out.to_bytes() {
+      if b == b'\n' {
+        lines = lines + 1
+      }
+    }
+    assert_eq(lines, 50000)
+  })
+}

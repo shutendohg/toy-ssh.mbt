@@ -158,6 +158,17 @@ pub fn Conn::transport(self : Conn) -> @transport.Transport {
 /// any task.
 pub fn Conn::send(self : Conn, payload : BytesView) -> Unit {
   self.transport.send_packet(payload)
+  self.notify()
+}
+
+///|
+/// Wake the writer, unless it has already gone. The semaphore aborts once
+/// its value reaches its size, so releasing with no consumer left would
+/// eventually kill the process rather than just the connection.
+fn Conn::notify(self : Conn) -> Unit {
+  if self.stopped {
+    return
+  }
   self.wake.release()
 }
 
@@ -166,7 +177,7 @@ pub fn Conn::send(self : Conn, payload : BytesView) -> Unit {
 /// actually written before the connection winds down.
 pub fn Conn::disconnect(self : Conn, code : UInt, description : String) -> Unit {
   self.transport.disconnect(code, description)
-  self.wake.release()
+  self.notify()
 }
 
 ///|
@@ -222,8 +233,12 @@ async fn Conn::write_loop(self : Conn) -> Unit {
     let out = self.transport.take_outgoing()
     if out.length() > 0 {
       self.socket.write(out) catch {
-        // The peer is gone; the read side will notice too.
-        _ => break
+        // The peer is gone. Say so before leaving, so nothing keeps
+        // waking a writer that no longer exists.
+        _ => {
+          self.stopped = true
+          break
+        }
       }
     }
     if self.stopped {

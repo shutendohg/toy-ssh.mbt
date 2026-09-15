@@ -250,13 +250,20 @@ that path is clean.
   32768 you advertise.
 - **A channel-addressed message needs a channel.** Refuse `CHANNEL_REQUEST`, `CHANNEL_DATA`,
   `CHANNEL_WINDOW_ADJUST`, `CHANNEL_EOF` and `CHANNEL_CLOSE` that arrive before
-  `CHANNEL_OPEN`, rather than treating channel 0 as implicitly present.
+  `CHANNEL_OPEN`, rather than treating channel 0 as implicitly present. For the same reason,
+  **encode a queued message when you send it, not when you queue it**: the peer's
+  `recipient_channel` is unknown until it confirms the channel, and the client can reach end
+  of its own standard input before that. (Addressing everything to 0 appears to work against
+  OpenSSH only because `sshd` numbers the first session channel 0.)
 
 ### Closing & exit status
 
 Typical teardown (server side, after the process exits):
 
-1. Flush remaining stdout/stderr as DATA/EXTENDED_DATA.
+1. Flush remaining stdout/stderr as DATA/EXTENDED_DATA. **Wait for both output pumps to
+   reach end of file first.** A child is reaped the moment it exits while its pipes may still
+   hold unread bytes, so reporting the status on the process's exit alone races the tail of
+   its own output out of the channel.
 2. Send the exit status as a channel request (no reply):
    ```
    byte      98  SSH_MSG_CHANNEL_REQUEST

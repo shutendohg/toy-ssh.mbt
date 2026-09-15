@@ -244,7 +244,12 @@ More quirks found in M4:
   writer cannot park with bytes queued. Wait on the writer task before the read loop returns,
   or the caller closes the socket with the last packet unsent.
 - A task whose read never ends (this process's standard input on a terminal) must be spawned
-  with `spawn_bg(no_wait=true, …)`, or the task group waits for it forever.
+  with `spawn_bg(no_wait=true, …)`, or the task group waits for it forever. The converse also
+  bites: a task group waits for a spawned child process, so cancel the child when the peer
+  disconnects or the connection's socket stays open as long as the command runs.
+- `@semaphore.Semaphore::release` **aborts** once its value reaches the size it was built
+  with. If the consumer can exit (a writer task that breaks on a socket error), stop
+  releasing — otherwise a connection error turns into a process-wide crash.
 - `@process.spawn` puts the waiter in the group you pass, and `read_from_process()` /
   `write_to_process()` give you the pipe ends. A write to a child that already exited fails
   with a catchable error rather than a signal, so swallow it: a peer that keeps sending

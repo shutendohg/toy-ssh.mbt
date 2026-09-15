@@ -25,6 +25,9 @@ pub struct Child {
   proc : @process.Process
   stdin : @process.WriteToProcess
   stdin_closed : Ref[Bool]
+  /// The two output pumps. `wait` joins them first, so it means "the
+  /// command finished *and* all of its output has been handed over".
+  pumps : Array[@async.Task[Unit]]
 }
 
 ///|
@@ -70,7 +73,7 @@ async fn pump(
 /// the spawned reader tasks live in `group`. They are called with a
 /// non-empty `Bytes` and are never called again after the stream ends.
 ///
-/// Three tasks join `group`: the two reader pumps and the process waiter
+/// Three tasks join `group`: the two reader pumps (joined by `wait`) and the process waiter
 /// that `@process.spawn` adds. All three finish on their own once the child
 /// exits and closes its pipes, so `group` completes without extra help; the
 /// caller does not need `Child::wait` for that. Cancelling `group` runs
@@ -102,9 +105,11 @@ pub async fn[X] spawn_session(
     stdout=child_stdout,
     stderr=child_stderr,
   )
-  group.spawn_bg(() => pump(our_stdout, on_stdout))
-  group.spawn_bg(() => pump(our_stderr, on_stderr))
-  { proc, stdin: our_stdin, stdin_closed: Ref(false), }
+  let pumps = [
+    group.spawn(() => pump(our_stdout, on_stdout)),
+    group.spawn(() => pump(our_stderr, on_stderr)),
+  ]
+  { proc, stdin: our_stdin, stdin_closed: Ref(false), pumps, }
 }
 
 ///|
@@ -147,15 +152,32 @@ pub fn Child::close_stdin(self : Child) -> Unit {
 }
 
 ///|
-/// Wait for the child to exit and return its exit status.
+/// Wait for the child to finish: both output pumps reach end of file and
+/// the process is reaped. Returns its exit status.
+///
+/// The pumps are joined **first**, and that ordering is the point. A child
+/// is reaped the moment it exits, while its pipes may still hold unread
+/// output; reporting the exit status then would put `exit-status`, EOF and
+/// CLOSE ahead of the tail of the command's output, and the peer would
+/// either lose it or reject it as data for a closed channel.
 ///
 /// This is the value for the `exit-status` channel request (docs/04 Part B
-/// "Closing & exit status"). It is idempotent: a second call returns the
-/// same status. A child killed by a signal reports the negated signal
-/// number, which is not a valid `exit-status`; the connection layer decides
-/// what to report, since `exit-signal` is out of scope.
+/// "Closing & exit status"). A child killed by a signal reports the negated
+/// signal number, which is not a valid `exit-status`; the connection layer
+/// decides what to report, since `exit-signal` is out of scope.
 pub async fn Child::wait(self : Child) -> Int {
+  for pump in self.pumps {
+    pump.wait()
+  }
   self.proc.wait()
+}
+
+///|
+/// Kill the child: SIGTERM, then SIGKILL after the grace period that
+/// `@process.spawn`'s default cancel handler applies. Used when the peer
+/// disconnects, so a `sleep 3600` does not outlive its connection.
+pub fn Child::cancel(self : Child) -> Unit {
+  self.proc.cancel()
 }
 
 ///|

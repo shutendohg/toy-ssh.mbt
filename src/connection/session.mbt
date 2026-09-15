@@ -49,8 +49,12 @@ const MAX_CHANNEL_MESSAGE : UInt = 32768
 enum Pending {
   /// `None` for CHANNEL_DATA, `Some(code)` for CHANNEL_EXTENDED_DATA.
   Data(data~ : Bytes, extended~ : UInt?)
-  /// EOF, CLOSE or `exit-status`: ordered after the data before it.
-  Control(Bytes)
+  /// Ordered after the data before it, and encoded only when drained:
+  /// the peer's channel id is not known until it confirms the channel, so
+  /// baking it in at queue time addressed everything to channel 0.
+  Eof
+  Close
+  ExitStatus(UInt)
 }
 
 ///|
@@ -68,6 +72,8 @@ struct Channel {
   recv_window_size : UInt
   /// The maximum packet size we advertise to the peer.
   recv_max_packet : UInt
+  /// Set once the peer has told us its channel id and limits.
+  mut peer_known : Bool
   mut eof_sent : Bool
   mut eof_received : Bool
   mut close_sent : Bool
@@ -84,6 +90,7 @@ fn Channel::new(window_size : UInt, max_packet_size : UInt) -> Channel {
     recv_used: 0,
     recv_window_size: window_size,
     recv_max_packet: max_packet_size,
+    peer_known: false,
     eof_sent: false,
     eof_received: false,
     close_sent: false,
@@ -100,10 +107,28 @@ fn Channel::drain(
   queue : Array[Pending],
   out : Array[Bytes],
 ) -> Unit {
+  // Nothing in this queue can be addressed until the peer has told us its
+  // channel id and packet limit.
+  if !self.peer_known {
+    return
+  }
   while !queue.is_empty() {
     match queue[0] {
-      Control(payload) => {
-        out.push(payload)
+      Eof => {
+        out.push(encode_channel_eof(recipient_channel=self.remote_channel))
+        queue.remove(0) |> ignore
+      }
+      Close => {
+        out.push(encode_channel_close(recipient_channel=self.remote_channel))
+        queue.remove(0) |> ignore
+      }
+      ExitStatus(code) => {
+        out.push(
+          encode_exit_status_request(
+            recipient_channel=self.remote_channel,
+            exit_status=code,
+          ),
+        )
         queue.remove(0) |> ignore
       }
       Data(data~, extended~) => {
@@ -121,6 +146,12 @@ fn Channel::drain(
           self.send_max_packet
         } else {
           MAX_CHANNEL_MESSAGE
+        }
+        // `accept_peer_limits` refuses anything below MIN_MAX_PACKET, so
+        // this cannot underflow; guard anyway rather than rely on it from
+        // two files away.
+        if limit <= overhead {
+          return
         }
         let payload_cap = limit - overhead
         let room = if self.send_window < payload_cap {
@@ -216,6 +247,7 @@ fn Channel::accept_peer_limits(
   self.remote_channel = remote_channel
   self.send_window = initial_window_size
   self.send_max_packet = maximum_packet_size
+  self.peer_known = true
 }
 
 ///|
@@ -229,7 +261,8 @@ fn check_channel(channel : UInt, ctx : String) -> Unit raise ConnectionError {
 
 ///|
 /// The same check plus "a channel exists at all": a channel-addressed
-/// message before CHANNEL_OPEN names something that was never created.
+/// message that arrives before the channel was opened and confirmed names
+/// something that does not exist yet.
 fn check_open_channel(
   opened : Bool,
   channel : UInt,
@@ -322,6 +355,20 @@ pub fn ClientSession::take_outgoing(self : ClientSession) -> Array[Bytes] {
 }
 
 ///|
+/// How many bytes are queued and not yet sent, so a caller feeding us
+/// standard input can stop reading instead of buffering without bound.
+pub fn ClientSession::queued_bytes(self : ClientSession) -> Int {
+  let mut total = 0
+  for item in self.queue {
+    match item {
+      Data(data~, ..) => total = total + data.length()
+      _ => ()
+    }
+  }
+  total
+}
+
+///|
 /// The exit status, once the server has reported one.
 pub fn ClientSession::exit_status(self : ClientSession) -> UInt? {
   self.exit_status
@@ -393,9 +440,7 @@ pub fn ClientSession::send_eof(self : ClientSession) -> Unit {
   self.ch.eof_sent = true
   // Queued behind any data still waiting for window credit: EOF means "no
   // more data", so overtaking it makes the peer reject what follows.
-  self.queue.push(
-    Control(encode_channel_eof(recipient_channel=self.ch.remote_channel)),
-  )
+  self.queue.push(Eof)
 }
 
 ///|
@@ -451,23 +496,31 @@ pub fn ClientSession::on_payload(
       events.push(OpenFailed(reason~, description~))
     }
     SSH_MSG_CHANNEL_SUCCESS => {
-      check_channel(decode_channel_success(payload), "CHANNEL_SUCCESS")
+      check_open_channel(
+        self.ch.peer_known,
+        decode_channel_success(payload),
+        "CHANNEL_SUCCESS",
+      )
       self.running = true
     }
     SSH_MSG_CHANNEL_FAILURE => {
-      check_channel(decode_channel_failure(payload), "CHANNEL_FAILURE")
+      check_open_channel(
+        self.ch.peer_known,
+        decode_channel_failure(payload),
+        "CHANNEL_FAILURE",
+      )
       raise ConnectionError("the server refused the exec or shell request")
     }
     SSH_MSG_CHANNEL_DATA => {
       let (channel, data) = decode_channel_data(payload)
-      check_channel(channel, "CHANNEL_DATA")
+      check_open_channel(self.ch.peer_known, channel, "CHANNEL_DATA")
       self.ch.check_not_after_eof("CHANNEL_DATA")
       self.receive(data.length(), events)
       events.push(Stdout(data))
     }
     SSH_MSG_CHANNEL_EXTENDED_DATA => {
       let (channel, code, data) = decode_channel_extended_data(payload)
-      check_channel(channel, "CHANNEL_EXTENDED_DATA")
+      check_open_channel(self.ch.peer_known, channel, "CHANNEL_EXTENDED_DATA")
       self.receive(data.length(), events)
       // Anything but stderr is unknown to us; RFC 4254 lets us drop it.
       if code == SSH_EXTENDED_DATA_STDERR {
@@ -476,12 +529,16 @@ pub fn ClientSession::on_payload(
     }
     SSH_MSG_CHANNEL_WINDOW_ADJUST => {
       let (channel, add) = decode_channel_window_adjust(payload)
-      check_channel(channel, "CHANNEL_WINDOW_ADJUST")
+      check_open_channel(self.ch.peer_known, channel, "CHANNEL_WINDOW_ADJUST")
       self.ch.grant(add)
     }
     SSH_MSG_CHANNEL_REQUEST => {
       let req = decode_channel_request(payload)
-      check_channel(req.recipient_channel, "CHANNEL_REQUEST")
+      check_open_channel(
+        self.ch.peer_known,
+        req.recipient_channel,
+        "CHANNEL_REQUEST",
+      )
       match req.request {
         ExitStatus(code) => {
           self.exit_status = Some(code)
@@ -496,12 +553,20 @@ pub fn ClientSession::on_payload(
       }
     }
     SSH_MSG_CHANNEL_EOF => {
-      check_channel(decode_channel_eof(payload), "CHANNEL_EOF")
+      check_open_channel(
+        self.ch.peer_known,
+        decode_channel_eof(payload),
+        "CHANNEL_EOF",
+      )
       self.ch.eof_received = true
       events.push(Eof)
     }
     SSH_MSG_CHANNEL_CLOSE => {
-      check_channel(decode_channel_close(payload), "CHANNEL_CLOSE")
+      check_open_channel(
+        self.ch.peer_known,
+        decode_channel_close(payload),
+        "CHANNEL_CLOSE",
+      )
       self.ch.close_received = true
       self.close(events)
     }
@@ -643,25 +708,14 @@ pub fn ServerSession::finish(self : ServerSession, exit_status~ : UInt) -> Unit 
   self.finished = true
   // All three are queued behind whatever output is still waiting for
   // window credit, so the peer never sees them before the last byte.
-  self.queue.push(
-    Control(
-      encode_exit_status_request(
-        recipient_channel=self.ch.remote_channel,
-        exit_status~,
-      ),
-    ),
-  )
+  self.queue.push(ExitStatus(exit_status))
   if !self.ch.eof_sent {
     self.ch.eof_sent = true
-    self.queue.push(
-      Control(encode_channel_eof(recipient_channel=self.ch.remote_channel)),
-    )
+    self.queue.push(Eof)
   }
   if !self.ch.close_sent {
     self.ch.close_sent = true
-    self.queue.push(
-      Control(encode_channel_close(recipient_channel=self.ch.remote_channel)),
-    )
+    self.queue.push(Close)
   }
 }
 

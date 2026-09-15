@@ -35,6 +35,12 @@ struct ClientOptions {
 }
 
 ///|
+/// How many unsent standard-input bytes we let pile up before we stop
+/// reading. One window's worth: the queue cannot drain faster than the
+/// peer grants credit anyway.
+const STDIN_QUEUE_LIMIT : Int = 2097152
+
+///|
 /// What we advertise for the session channel (docs/04 Part B).
 const CHANNEL_WINDOW : UInt = 2097152
 
@@ -309,6 +315,12 @@ async fn handle_userauth(
 async fn pump_stdin(c : @net.Conn, s : @connection.ClientSession) -> Unit {
   let buf = FixedArray::make(16384, b'\x00')
   while true {
+    // Backpressure: without this, `client host 'sleep 60' < big-file`
+    // reads the whole file into the send queue, because the queue only
+    // drains as fast as the peer grants window credit.
+    while s.queued_bytes() > STDIN_QUEUE_LIMIT {
+      @async.sleep(10)
+    }
     let n = @stdio.stdin.read(buf)
     if n == 0 {
       break
@@ -386,13 +398,18 @@ fn parse_args(args : Array[String]) -> ClientOptions {
     if !flag.has_prefix("-") {
       if target is None {
         target = Some(flag)
-      } else if command is None {
-        // The remaining argument is the command to run, like `ssh`.
-        command = Some(flag)
-      } else {
-        usage_error("unexpected extra argument: \{flag}")
+        i = i + 1
+        continue
       }
-      i = i + 1
+      // Everything from here on is the command, joined with spaces the way
+      // `ssh` does, so `client host echo hello` works and a leading `-`
+      // inside the command is not mistaken for a flag.
+      let words = []
+      while i < args.length() {
+        words.push(args[i])
+        i = i + 1
+      }
+      command = Some(words.join(" "))
       continue
     }
     guard i + 1 < args.length() else { usage_error("\{flag} needs a value") }

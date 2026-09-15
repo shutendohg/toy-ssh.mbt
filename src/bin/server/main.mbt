@@ -160,6 +160,17 @@ async fn[X] serve(
         )
     }
   })
+  // The read side is done. A command still running would otherwise keep
+  // this connection's task group — and the socket — alive: `sleep 3600`
+  // outlived its client by an hour.
+  match child {
+    Some(ch) => {
+      @net.log("[\{peer}] peer gone, stopping pid \{ch.pid()}")
+      ch.close_stdin()
+      ch.cancel()
+    }
+    None => ()
+  }
 }
 
 ///|
