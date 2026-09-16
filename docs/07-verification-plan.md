@@ -181,6 +181,40 @@ exit code propagates. **Note:** unprivileged `sshd` can't switch users, so log i
 **your own** username (`$(whoami)`), and it can't do system password auth — that's why toy
 client ↔ real sshd interop is **publickey-only** (password interop is covered by 3b instead).
 
+### 3e. Post-quantum hybrid key exchange (M6)
+
+Force `mlkem768x25519-sha256` on each side in turn, so neither the fallback to
+`curve25519-sha256` nor a silent downgrade can pass for success.
+
+**OpenSSH `ssh` → toy server.** Start the toy server as in §3b, then:
+
+```
+ssh -vv -T -p 2222 -o KexAlgorithms=mlkem768x25519-sha256 \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./interop/known_hosts \
+    -o IdentitiesOnly=yes -i ./interop/client_ed25519 \
+    user@127.0.0.1 'echo pq; exit 3'
+```
+
+Expected: `debug1: kex: algorithm: mlkem768x25519-sha256`, NEWKEYS both ways,
+`Authenticated to ...`, `pq` on stdout and `ssh` exiting 3. Run the same command with
+`-o KexAlgorithms=curve25519-sha256` as well: both methods must work, since we advertise
+both.
+
+**Toy client → OpenSSH `sshd`.** Put `KexAlgorithms mlkem768x25519-sha256` in
+`interop/sshd_config` (restricting it to the hybrid, so a fallback cannot hide a failure),
+start `sshd -ddd` as in §3c, then:
+
+```
+client -p 2200 -i ./interop/client_ed25519 \
+       --known-hosts ./interop/toy_known_hosts $(whoami)@127.0.0.1 'echo both; exit 6'
+```
+
+Expected: `sshd` logs `debug1: kex: algorithm: mlkem768x25519-sha256` and
+`Accepted publickey for ...`, the command output arrives and the client exits 6.
+
+Verified 2026-09-16 against OpenSSH_10.2p1 in both directions, with the classical exchange
+re-checked in the same run.
+
 ### 3d. Reading the debug output
 
 - `ssh -vvv`: look for `SSH2_MSG_KEXINIT`, `expecting SSH2_MSG_KEX_ECDH_REPLY`,

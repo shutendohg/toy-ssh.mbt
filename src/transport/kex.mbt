@@ -313,6 +313,11 @@ pub fn kex_server_exchange(
 ) -> (Bytes, Bytes) raise ProtocolError {
   match kex {
     Curve25519 => {
+      // Checked here rather than left to X25519's own length guard, so a
+      // truncated blob reports a framing error instead of being reported
+      // as a low-order point, and so this arm does not depend on an
+      // invariant of another package.
+      expect_blob_length(client_blob, ECDH_POINT_LEN, "Q_C")
       let raw = shared_secret(ephemeral_scalar, client_blob)
       (ecdh_public(ephemeral_scalar), shared_secret_mpint(raw[:]))
     }
@@ -323,11 +328,7 @@ pub fn kex_server_exchange(
         )
       }
       let ek_len = @crypto.MLKEM768_ENCAPS_KEY_LEN
-      if client_blob.length() != ek_len + ECDH_POINT_LEN {
-        raise ProtocolError(
-          "hybrid kex: client blob must be \{ek_len + ECDH_POINT_LEN} bytes, got \{client_blob.length()}",
-        )
-      }
+      expect_blob_length(client_blob, ek_len + ECDH_POINT_LEN, "client blob")
       // A malformed encapsulation key would make the two sides disagree
       // rather than fail, so refuse it here instead of aborting inside
       // the KEM.
@@ -356,16 +357,13 @@ pub fn kex_client_shared(
 ) -> Bytes raise ProtocolError {
   match kex {
     Curve25519 => {
+      expect_blob_length(server_blob, ECDH_POINT_LEN, "Q_S")
       let raw = shared_secret(state.scalar[:], server_blob)
       shared_secret_mpint(raw[:])
     }
     MlKem768X25519 => {
       let ct_len = @crypto.MLKEM768_CIPHERTEXT_LEN
-      if server_blob.length() != ct_len + ECDH_POINT_LEN {
-        raise ProtocolError(
-          "hybrid kex: server blob must be \{ct_len + ECDH_POINT_LEN} bytes, got \{server_blob.length()}",
-        )
-      }
+      expect_blob_length(server_blob, ct_len + ECDH_POINT_LEN, "server blob")
       guard state.decaps_key is Some(dk) else {
         abort("hybrid kex: no ML-KEM key was generated")
       }
@@ -373,6 +371,22 @@ pub fn kex_client_shared(
       let x_ss = shared_secret(state.scalar[:], server_blob[ct_len:])
       hybrid_shared_secret(kem_ss[:], x_ss[:])
     }
+  }
+}
+
+///|
+/// A peer's key exchange blob must be exactly as long as the negotiated
+/// method says. The codecs treat it as an opaque string, so this is where
+/// the length is enforced.
+fn expect_blob_length(
+  blob : BytesView,
+  want : Int,
+  name : String,
+) -> Unit raise ProtocolError {
+  if blob.length() != want {
+    raise ProtocolError(
+      "kex: \{name} must be \{want} bytes, got \{blob.length()}",
+    )
   }
 }
 

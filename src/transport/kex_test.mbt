@@ -827,3 +827,70 @@ test "hybrid exchange: malformed peer blobs are protocol errors" {
     _ => fail("expected a ProtocolError for an all-zero X25519 half")
   }
 }
+
+///|
+test "a truncated blob reports a framing error, not a low-order point" {
+  // The codecs treat the blob as an opaque string, so the length check
+  // lives with the method. Before this, a 31-byte Q_C reached X25519 and
+  // came back as "invalid or low-order", which blames an attack for what
+  // is a framing bug.
+  let scalar = @hex.decode(
+    "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+  )
+  let (_, state) = @transport.kex_client_init(
+    @transport.Curve25519,
+    scalar[:],
+    b""[:],
+  )
+  try
+    ignore(
+      @transport.kex_server_exchange(
+        @transport.Curve25519,
+        scalar[:],
+        b""[:],
+        Bytes::make(31, b'\x09')[:],
+      ),
+    )
+  catch {
+    e =>
+      debug_inspect(
+        e,
+        content="ProtocolError(\"kex: Q_C must be 32 bytes, got 31\")",
+      )
+  } noraise {
+    _ => fail("expected a ProtocolError")
+  }
+  try
+    ignore(
+      @transport.kex_client_shared(
+        @transport.Curve25519,
+        state,
+        Bytes::make(33, b'\x09')[:],
+      ),
+    )
+  catch {
+    e =>
+      debug_inspect(
+        e,
+        content="ProtocolError(\"kex: Q_S must be 32 bytes, got 33\")",
+      )
+  } noraise {
+    _ => fail("expected a ProtocolError")
+  }
+  // An all-zero blob of the right length still reports the real reason.
+  try
+    ignore(
+      @transport.kex_server_exchange(
+        @transport.Curve25519,
+        scalar[:],
+        b""[:],
+        Bytes::make(32, b'\x00')[:],
+      ),
+    )
+  catch {
+    ProtocolError(m) =>
+      assert_true(m.contains("low-order") || m.contains("invalid"))
+  } noraise {
+    _ => fail("expected a ProtocolError")
+  }
+}

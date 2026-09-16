@@ -11,10 +11,14 @@
 /// supplies the randomness, which keeps the whole scheme testable and
 /// keeps this package free of IO, matching the rest of `crypto`.
 ///
-/// Toy code. Never use for real security. Nothing here is constant-time,
-/// and a real implementation would also reject malformed encapsulation
-/// keys by re-encoding them (FIPS 203 section 7.2's "modulus check"),
-/// which this does — see `mlkem768_encaps`.
+/// Toy code. Never use for real security: nothing here is constant-time,
+/// and key material is not protected in memory.
+///
+/// What *is* implemented, so an auditor need not guess: FIPS 203 section
+/// 7.2's modulus check on a peer's encapsulation key
+/// (`mlkem768_encaps_key_is_valid`) and the implicit rejection of
+/// Algorithm 18. What is not: any side-channel resistance, and the
+/// decapsulation-key check of section 7.3.
 
 ///|
 /// Polynomials per vector.
@@ -243,7 +247,15 @@ fn decompress_vector(
 /// `K-PKE.KeyGen` (Algorithm 13) from a 32-byte seed `d`.
 fn kpke_keygen(d : BytesView) -> (Bytes, Bytes) {
   // FIPS 203's final version appends the parameter k to the seed before
-  // hashing. Leaving it out yields keys that no conforming peer can use.
+  // hashing; the draft did not.
+  //
+  // Omitting it does NOT break interoperability, which is exactly why it
+  // is dangerous: the key pair stays internally consistent, so a
+  // conforming peer encapsulates to this `ek`, this side decapsulates
+  // with the matching `dk`, and both derive the same secret. Only the
+  // ACVP keyGen vector, which fixes `d` and expects a specific `ek`,
+  // catches it. Do not drop that test on the grounds that interop or the
+  // round trip covers this.
   let (rho, sigma) = mlkem_g(
     (d.to_owned() + Bytes::make(1, MLKEM768_K.to_byte()))[:],
   )

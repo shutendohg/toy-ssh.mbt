@@ -212,8 +212,13 @@ key exchange, advertised **first** the way OpenSSH advertises it.
 properties that define them) → ML-KEM against the ACVP vectors → the kex dispatch seam →
 the hybrid method → OpenSSH interop.
 
-**Traps worth repeating:** the final FIPS 203 appends the parameter `k` to the seed before
-hashing in key generation (the draft did not), the matrix is sampled as
-`A[i][j] = SampleNTT(rho‖j‖i)` and read **transposed** during encryption, and a peer's
-encapsulation key must pass the modulus check or the two sides silently derive different
-secrets.
+**Traps worth repeating:**
+
+- The final FIPS 203 appends the parameter `k` to the seed before hashing in key generation
+  (the draft did not). **Omitting it still interoperates**, because the key pair stays
+  internally consistent — only the ACVP keyGen vector catches it. Do not drop that test on
+  the grounds that interop covers it.
+- The matrix is sampled as `A[i][j] = SampleNTT(rho‖j‖i)` and read **transposed** during
+  encryption. A symmetric mistake here round-trips happily and talks to nobody.
+- A peer's encapsulation key must pass the §7.2 modulus check, or the two sides silently
+  derive different secrets instead of failing.
