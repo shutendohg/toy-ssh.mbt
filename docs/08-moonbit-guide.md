@@ -257,6 +257,18 @@ More quirks found in M4:
 - `@stdio.stdout.write` / `@stdio.stderr.write` take bytes and go straight to the fd, which is
   what a remote command's output needs — never route it through a `String`.
 
+More quirks found in M6:
+
+- **`&` binds looser than `==`.** `(x >> b) & 1 == 1` parses as `(x >> b) & (1 == 1)` and fails
+  to compile with an Int/Bool mismatch. Write `((x >> b) & 1) == 1`. `moon fmt` will add those
+  clarifying parentheses to the *broken* parse, so the formatted source shows you what the
+  compiler thought you meant.
+- **A `grep` that finds nothing does not prove an edit landed** — the pattern may simply no
+  longer match because something else rewrote the line. Assert that a scripted replacement
+  actually matched, rather than inferring it from a silent grep.
+- `moon test -f <file>` is **not** a per-file filter; it reports "no test entry found". To time
+  one file's tests, empty it and compare.
+
 ## 7. Common pitfalls checklist (SSH-specific, MoonBit-flavored)
 
 - [ ] `mpint(K)`: added the leading `0x00` when the top bit is set? (kex hash breaks otherwise)

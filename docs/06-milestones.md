@@ -174,3 +174,51 @@ Pick any, each independent of the others:
 
 Each stretch item should come with its own acceptance test and, where an OpenSSH-comparable
 path exists, an interop check (e.g. force `ssh -o KexAlgorithms=diffie-hellman-group14-sha256`).
+
+---
+
+## M6 — Post-quantum hybrid key exchange `mlkem768x25519-sha256`
+
+**Status: done (2026-09-16).** Requested outside the original plan, and implemented after M4
+because it is the milestone that most needed the negotiation seam.
+
+**Deliverable:** ML-KEM-768 (FIPS 203) and Keccak (FIPS 202) built by hand, plus the hybrid
+key exchange, advertised **first** the way OpenSSH advertises it.
+
+**What the OpenSSH sources settle** (read from `kexmlkem768x25519.c`, `kexgen.c`,
+`kexc25519.c` and `crypto_api.h` — the draft alone leaves these ambiguous):
+
+- Messages **30 / 31 are reused**: `kexgen.c` drives the whole kexgen family, ML-KEM included.
+- The client's blob is **ML-KEM public key (1184) ‖ X25519 public key (32)**, one `string`.
+- The server's reply blob is **ML-KEM ciphertext (1088) ‖ X25519 public key (32)**.
+- `K` is **`string(SHA256(mlkem_ss ‖ x25519_ss))`**, both halves **raw bytes**. Plain
+  `curve25519-sha256` feeds its X25519 secret as an `mpint`
+  (`kexc25519_shared_key_ext(..., raw = 0)`); the hybrid uses `raw = 1` and then hashes. The
+  result enters `H` and key derivation as a `string`, **not** an `mpint`.
+- Sizes: public key 1184, secret key 2400, ciphertext 1088, shared secret 32.
+
+**Acceptance criteria:**
+
+1. Keccak pinned to FIPS 202 values (and Python `hashlib` where no official vector exists),
+   including the rate boundaries and multi-block squeezing.
+2. ML-KEM-768 pinned to **NIST ACVP vectors** for key generation, encapsulation and
+   decapsulation. This is the criterion that matters: round-trip tests prove only
+   self-consistency, because a transposed matrix or a swapped index order cancels out and
+   still round-trips.
+3. In-memory self-interop over the hybrid, with `K` encoded as a `string`.
+4. OpenSSH interop both directions with the hybrid forced on each side.
+
+**TDD order:** Keccak → the ring arithmetic (NTT, encoding, compression, tested by the
+properties that define them) → ML-KEM against the ACVP vectors → the kex dispatch seam →
+the hybrid method → OpenSSH interop.
+
+**Traps worth repeating:**
+
+- The final FIPS 203 appends the parameter `k` to the seed before hashing in key generation
+  (the draft did not). **Omitting it still interoperates**, because the key pair stays
+  internally consistent — only the ACVP keyGen vector catches it. Do not drop that test on
+  the grounds that interop covers it.
+- The matrix is sampled as `A[i][j] = SampleNTT(rho‖j‖i)` and read **transposed** during
+  encryption. A symmetric mistake here round-trips happily and talks to nobody.
+- A peer's encapsulation key must pass the §7.2 modulus check, or the two sides silently
+  derive different secrets instead of failing.

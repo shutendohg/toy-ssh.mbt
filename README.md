@@ -2,8 +2,9 @@
 
 An **experimental, educational** SSH-2 client and server written in
 [MoonBit](https://www.moonbitlang.com/), implemented from the RFCs with one fixed algorithm
-suite (`curve25519-sha256` / `ssh-ed25519` / `chacha20-poly1305@openssh.com`) and verified
-against OpenSSH in both directions.
+suite (`ssh-ed25519` / `chacha20-poly1305@openssh.com`, with either
+`mlkem768x25519-sha256` or `curve25519-sha256` for key exchange) and verified against OpenSSH
+in both directions.
 
 > **DO NOT USE THIS FOR ANYTHING REAL.** This is a toy for learning MoonBit and the SSH
 > protocol. The crypto is not constant-time, key material is not protected in memory, there
@@ -19,6 +20,7 @@ against OpenSSH in both directions.
 | M2 — key exchange + encrypted transport (OpenSSH interop, kex only) | done |
 | M3 — user authentication (`publickey` + `password`, OpenSSH interop) | done |
 | M4 — session channel: `exec` + non-PTY `shell` | done |
+| M6 — post-quantum hybrid kex `mlkem768x25519-sha256` | done |
 
 ## Layout
 

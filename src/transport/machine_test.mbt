@@ -12,6 +12,7 @@ fn client_config() -> @transport.TransportConfig raise {
     ephemeral_scalar: @hex.decode(
       "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
     ),
+    kem_random: Bytes::makei(64, i => (0xa0 + i).to_byte()),
     host_seed: None,
     fill: @transport.zero_padding,
     accept_host_key: _ => true,
@@ -26,6 +27,7 @@ fn server_config() -> @transport.TransportConfig raise {
     ephemeral_scalar: @hex.decode(
       "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
     ),
+    kem_random: Bytes::makei(32, i => (0xb0 + i).to_byte()),
     host_seed: Some(
       @hex.decode(
         "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
@@ -141,8 +143,9 @@ test "self-interop: encrypted payloads survive round trips in both directions" {
 
 ///|
 test "self-interop: exchange hash matches the kex fixture inputs" {
-  // Same scalars, cookies and host seed as kex_test's pinned fixture but
-  // with our own version string on both sides, so recompute H by hand.
+  // Recompute H by hand from the same inputs the two machines used. They
+  // negotiate the ML-KEM hybrid, so the blobs are the hybrid's and K is
+  // its `string`, not X25519's `mpint`.
   let c = @transport.Transport::new(client_config())
   let s = @transport.Transport::new(server_config())
   let (ec, _) = pump(c, s)
@@ -155,9 +158,22 @@ test "self-interop: exchange hash matches the kex fixture inputs" {
     Server,
     cookie=Bytes::make(16, b'\x22'),
   ).encode()
-  let q_c = @transport.ecdh_public(client_config().ephemeral_scalar[:])
-  let q_s = @transport.ecdh_public(server_config().ephemeral_scalar[:])
-  let k = @transport.shared_secret(client_config().ephemeral_scalar[:], q_s[:])
+  let (q_c, state) = @transport.kex_client_init(
+    @transport.MlKem768X25519,
+    client_config().ephemeral_scalar[:],
+    client_config().kem_random[:],
+  )
+  let (q_s, k_encoded) = @transport.kex_server_exchange(
+    @transport.MlKem768X25519,
+    server_config().ephemeral_scalar[:],
+    server_config().kem_random[:],
+    q_c[:],
+  )
+  // The client must reach the same K from the reply alone.
+  assert_eq(
+    @transport.kex_client_shared(@transport.MlKem768X25519, state, q_s[:]),
+    k_encoded,
+  )
   let k_s = @transport.encode_ed25519_host_key(
     @crypto.fixed_to_bytes(
       @crypto.ed25519_public_key(server_config().host_seed.unwrap()[:]),
@@ -172,7 +188,7 @@ test "self-interop: exchange hash matches the kex fixture inputs" {
     k_s~,
     q_c~,
     q_s~,
-    k_mpint=@transport.shared_secret_mpint(k[:]),
+    k_encoded~,
   )
   assert_eq(session_id, h)
 }
@@ -357,7 +373,7 @@ test "non-strict peer: IGNORE during kex is skipped and seqnums carry over" {
     k_s=reply.k_s,
     q_c=@transport.ecdh_public(scalar[:]),
     q_s=reply.q_s,
-    k_mpint=@transport.shared_secret_mpint(k[:]),
+    k_encoded=@transport.shared_secret_mpint(k[:]),
   )
   let keys = @transport.derive_session_keys(
     @transport.shared_secret_mpint(k[:])[:],

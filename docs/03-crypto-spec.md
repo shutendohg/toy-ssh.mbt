@@ -204,6 +204,27 @@ shared K         = 4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161
 
 ---
 
+## 4a. Keccak: SHA-3 and SHAKE (FIPS 202) — self-built
+
+Needed only by the ML-KEM hybrid key exchange (doc 06 M6): `moonbitlang/x/crypto` has
+SHA-1/2 families, MD5, RIPEMD-160, SM3, AES and ChaCha20, but **no Keccak**, so SHA3-256,
+SHA3-512, SHAKE128 and SHAKE256 are ours.
+
+```moonbit
+pub fn sha3_256(data : BytesView) -> FixedArray[Byte]                 // 32 bytes
+pub fn sha3_512(data : BytesView) -> FixedArray[Byte]                 // 64 bytes
+pub fn shake128(data : BytesView, out_len : Int) -> FixedArray[Byte]
+pub fn shake256(data : BytesView, out_len : Int) -> FixedArray[Byte]
+pub fn Shake128::new(data : BytesView) -> Shake128                    // incremental
+pub fn Shake128::squeeze(self : Shake128, n : Int) -> FixedArray[Byte]
+```
+
+The incremental form exists for ML-KEM's rejection sampling, which cannot know in advance how
+many bytes it needs. Traps: rate is 136 / 72 / 168 / 136 bytes respectively; the domain suffix
+is `0x06` for SHA-3 and `0x1f` for SHAKE (swapping them still yields plausible output, so pin
+both); lanes are little-endian; and the rotation table has a zero offset for lane (0,0), which
+a naive rotate would turn into a 64-bit shift.
+
 ## 5. Ed25519 (RFC 8032)
 
 Signature over the twisted Edwards curve edwards25519 (birationally equivalent to

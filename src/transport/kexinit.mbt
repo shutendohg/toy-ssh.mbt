@@ -24,6 +24,9 @@ pub(all) struct KexInit {
 /// Our single suite (docs/00, docs/02 section 3). The kex list carries the
 /// role-specific strict-kex marker; the MAC lists are deliberately empty
 /// because chacha20-poly1305@openssh.com is AEAD.
+pub const KEX_MLKEM768X25519_SHA256 : String = "mlkem768x25519-sha256"
+
+///|
 pub const KEX_CURVE25519_SHA256 : String = "curve25519-sha256"
 
 ///|
@@ -56,6 +59,9 @@ pub fn KexInit::for_role(role : Role, cookie~ : Bytes) -> KexInit {
   {
     cookie,
     kex_algorithms: [
+      // Post-quantum first, as OpenSSH does: a hybrid exchange should be
+      // the default rather than something a peer has to ask for.
+      KEX_MLKEM768X25519_SHA256,
       KEX_CURVE25519_SHA256,
       KEX_CURVE25519_SHA256_LIBSSH,
       strict,

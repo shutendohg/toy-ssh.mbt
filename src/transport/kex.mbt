@@ -140,25 +140,9 @@ pub(all) struct KexEcdhReply {
 const ECDH_POINT_LEN : Int = 32
 
 ///|
-fn kex_expect_point(
-  name : String,
-  ctx : String,
-  q : BytesView,
-) -> Unit raise ProtocolError {
-  if q.length() != ECDH_POINT_LEN {
-    raise ProtocolError(
-      "\{ctx}: \{name} must be \{ECDH_POINT_LEN} bytes, got \{q.length()}",
-    )
-  }
-}
-
-///|
-/// Payload: message byte, `string Q_C`. Our own Q_C of the wrong length is
-/// a programmer error and aborts.
+/// Payload: message byte, `string Q_C`. The blob comes from the negotiated
+/// method, which decides how long it is.
 pub fn KexEcdhInit::encode(self : KexEcdhInit) -> Bytes {
-  guard self.q_c.length() == ECDH_POINT_LEN else {
-    abort("KEX_ECDH_INIT: Q_C must be 32 bytes")
-  }
   let w = @wire.Writer::new(size_hint=40)
   w.write_byte(SSH_MSG_KEX_ECDH_INIT)
   w.write_string(self.q_c[:])
@@ -167,14 +151,15 @@ pub fn KexEcdhInit::encode(self : KexEcdhInit) -> Bytes {
 
 ///|
 /// Parse a KEX_ECDH_INIT payload; the whole payload must be consumed and
-/// Q_C must be exactly 32 bytes.
+/// The blob is opaque here: how long it should be is the negotiated
+/// method's business (32 bytes for X25519, 1216 for the ML-KEM hybrid),
+/// and each method checks it before use.
 pub fn KexEcdhInit::decode(
   payload : BytesView,
 ) -> KexEcdhInit raise ProtocolError {
   let ctx = "KEX_ECDH_INIT"
   let r = expect_message(payload, SSH_MSG_KEX_ECDH_INIT, ctx)
   let q_c = r.read_string() catch { e => raise wire_error(ctx, e) }
-  kex_expect_point("Q_C", ctx, q_c)
   expect_end(r, ctx)
   { q_c: q_c.to_owned(), }
 }
@@ -191,9 +176,10 @@ pub fn KexEcdhReply::encode(self : KexEcdhReply) -> Bytes {
 }
 
 ///|
-/// Parse a KEX_ECDH_REPLY payload; the whole payload must be consumed and
-/// Q_S must be exactly 32 bytes. K_S and the signature are not validated
-/// here (see the blob decoders).
+/// Parse a KEX_ECDH_REPLY payload; the whole payload must be consumed.
+/// Q_S is opaque here, like Q_C: its length belongs to the negotiated
+/// method. K_S and the signature are not validated here either (see the
+/// blob decoders).
 pub fn KexEcdhReply::decode(
   payload : BytesView,
 ) -> KexEcdhReply raise ProtocolError {
@@ -206,9 +192,220 @@ pub fn KexEcdhReply::decode(
   ) catch {
     e => raise wire_error(ctx, e)
   }
-  kex_expect_point("Q_S", ctx, q_s)
   expect_end(r, ctx)
   { k_s: k_s.to_owned(), q_s: q_s.to_owned(), signature: signature.to_owned(), }
+}
+
+// ---------------------------------------------------------------------------
+// Key exchange methods
+// ---------------------------------------------------------------------------
+
+///|
+/// A key exchange method: how the two `KEX_ECDH` blobs are built and how
+/// the shared secret `K` is derived from them.
+///
+/// This is the seam the design called for in docs/02: everything above it
+/// (the exchange hash, the signature, key derivation) is identical for
+/// every method, so a new method plugs in here without touching the
+/// transport state machine. Note that `K` comes out of these functions
+/// **already wire-encoded**, because the encoding is part of the method:
+/// `curve25519-sha256` feeds an `mpint`, while the ML-KEM hybrid feeds a
+/// `string` (see docs/02).
+pub(all) enum KexMethod {
+  /// `curve25519-sha256` and its `@libssh.org` alias: X25519, `mpint(K)`.
+  Curve25519
+  /// `mlkem768x25519-sha256`: ML-KEM-768 alongside X25519, with
+  /// `string(SHA256(mlkem_ss || x25519_ss))` as `K`.
+  MlKem768X25519
+} derive(Debug, Eq)
+
+///|
+/// What the client keeps between sending `KEX_ECDH_INIT` and receiving the
+/// reply. For X25519 alone the scalar in the config is enough; the hybrid
+/// also has an ML-KEM decapsulation key, which is far too large to
+/// regenerate for free and must be the *same* one the public blob came
+/// from.
+pub struct KexClientState {
+  scalar : Bytes
+  /// The blob we sent, kept because the exchange hash needs it again when
+  /// the reply arrives. Rebuilding it would mean a second ML-KEM key
+  /// generation, the most expensive step in the handshake.
+  public : Bytes
+  /// The hybrid's ML-KEM decapsulation key, if this method has one.
+  decaps_key : Bytes?
+}
+
+///|
+/// The blob we sent in `KEX_ECDH_INIT`, which is also `Q_C` in the
+/// exchange hash.
+pub fn KexClientState::public(self : KexClientState) -> Bytes {
+  self.public
+}
+
+///|
+/// The method a negotiated kex name selects, or `None` for a name we do
+/// not implement. The strict-kex markers are not methods.
+pub fn kex_method(name : String) -> KexMethod? {
+  match name {
+    KEX_CURVE25519_SHA256 | KEX_CURVE25519_SHA256_LIBSSH => Some(Curve25519)
+    KEX_MLKEM768X25519_SHA256 => Some(MlKem768X25519)
+    _ => None
+  }
+}
+
+///|
+/// Bytes of ML-KEM randomness each role needs: the client generates a key
+/// pair from `d || z`, the server encapsulates with one 32-byte message.
+pub const KEM_CLIENT_RANDOM_LEN : Int = 64
+
+///|
+pub const KEM_SERVER_RANDOM_LEN : Int = 32
+
+///|
+/// Client side: the blob for `KEX_ECDH_INIT`, and the state to keep until
+/// the reply arrives.
+///
+/// `kem_random` is only read by a method that needs it; it must hold
+/// `KEM_CLIENT_RANDOM_LEN` bytes for the hybrid.
+pub fn kex_client_init(
+  kex : KexMethod,
+  ephemeral_scalar : BytesView,
+  kem_random : BytesView,
+) -> (Bytes, KexClientState) {
+  match kex {
+    Curve25519 => {
+      let public = ecdh_public(ephemeral_scalar)
+      (
+        public,
+        { scalar: ephemeral_scalar.to_owned(), public, decaps_key: None, },
+      )
+    }
+    MlKem768X25519 => {
+      guard kem_random.length() >= KEM_CLIENT_RANDOM_LEN else {
+        abort(
+          "hybrid kex needs \{KEM_CLIENT_RANDOM_LEN} bytes of ML-KEM randomness",
+        )
+      }
+      let (ek, dk) = @crypto.mlkem768_keygen(
+        kem_random[0:32],
+        kem_random[32:64],
+      )
+      let public = ek + ecdh_public(ephemeral_scalar)
+      (
+        public,
+        { scalar: ephemeral_scalar.to_owned(), public, decaps_key: Some(dk), },
+      )
+    }
+  }
+}
+
+///|
+/// Server side: answer the client's blob with our own and the encoded
+/// shared secret. A malformed blob is the peer's fault.
+///
+/// `kem_random` must hold `KEM_SERVER_RANDOM_LEN` bytes for the hybrid: the
+/// message ML-KEM encapsulates.
+pub fn kex_server_exchange(
+  kex : KexMethod,
+  ephemeral_scalar : BytesView,
+  kem_random : BytesView,
+  client_blob : BytesView,
+) -> (Bytes, Bytes) raise ProtocolError {
+  match kex {
+    Curve25519 => {
+      // Checked here rather than left to X25519's own length guard, so a
+      // truncated blob reports a framing error instead of being reported
+      // as a low-order point, and so this arm does not depend on an
+      // invariant of another package.
+      expect_blob_length(client_blob, ECDH_POINT_LEN, "Q_C")
+      let raw = shared_secret(ephemeral_scalar, client_blob)
+      (ecdh_public(ephemeral_scalar), shared_secret_mpint(raw[:]))
+    }
+    MlKem768X25519 => {
+      guard kem_random.length() >= KEM_SERVER_RANDOM_LEN else {
+        abort(
+          "hybrid kex needs \{KEM_SERVER_RANDOM_LEN} bytes of ML-KEM randomness",
+        )
+      }
+      let ek_len = @crypto.MLKEM768_ENCAPS_KEY_LEN
+      expect_blob_length(client_blob, ek_len + ECDH_POINT_LEN, "client blob")
+      // A malformed encapsulation key would make the two sides disagree
+      // rather than fail, so refuse it here instead of aborting inside
+      // the KEM.
+      if !@crypto.mlkem768_encaps_key_is_valid(client_blob[0:ek_len]) {
+        raise ProtocolError("hybrid kex: malformed ML-KEM encapsulation key")
+      }
+      let (ct, kem_ss) = @crypto.mlkem768_encaps(
+        client_blob[0:ek_len],
+        kem_random[0:32],
+      )
+      let x_ss = shared_secret(ephemeral_scalar, client_blob[ek_len:])
+      (
+        ct + ecdh_public(ephemeral_scalar),
+        hybrid_shared_secret(kem_ss[:], x_ss[:]),
+      )
+    }
+  }
+}
+
+///|
+/// Client side: the encoded shared secret, from the server's blob.
+pub fn kex_client_shared(
+  kex : KexMethod,
+  state : KexClientState,
+  server_blob : BytesView,
+) -> Bytes raise ProtocolError {
+  match kex {
+    Curve25519 => {
+      expect_blob_length(server_blob, ECDH_POINT_LEN, "Q_S")
+      let raw = shared_secret(state.scalar[:], server_blob)
+      shared_secret_mpint(raw[:])
+    }
+    MlKem768X25519 => {
+      let ct_len = @crypto.MLKEM768_CIPHERTEXT_LEN
+      expect_blob_length(server_blob, ct_len + ECDH_POINT_LEN, "server blob")
+      guard state.decaps_key is Some(dk) else {
+        abort("hybrid kex: no ML-KEM key was generated")
+      }
+      let kem_ss = @crypto.mlkem768_decaps(dk[:], server_blob[0:ct_len])
+      let x_ss = shared_secret(state.scalar[:], server_blob[ct_len:])
+      hybrid_shared_secret(kem_ss[:], x_ss[:])
+    }
+  }
+}
+
+///|
+/// A peer's key exchange blob must be exactly as long as the negotiated
+/// method says. The codecs treat it as an opaque string, so this is where
+/// the length is enforced.
+fn expect_blob_length(
+  blob : BytesView,
+  want : Int,
+  name : String,
+) -> Unit raise ProtocolError {
+  if blob.length() != want {
+    raise ProtocolError(
+      "kex: \{name} must be \{want} bytes, got \{blob.length()}",
+    )
+  }
+}
+
+///|
+/// `K = string(SHA256(mlkem_ss || x25519_ss))`, both halves raw.
+///
+/// The raw concatenation is the trap: plain `curve25519-sha256` feeds its
+/// X25519 secret in as an `mpint`, while the hybrid feeds both secrets in
+/// as plain bytes and then hashes them (OpenSSH's
+/// `kexc25519_shared_key_ext` with `raw = 1`). The result is a `string`,
+/// not an `mpint`.
+fn hybrid_shared_secret(kem_ss : BytesView, x_ss : BytesView) -> Bytes {
+  let concat = @wire.Writer::new(size_hint=64)
+  concat.write_raw(kem_ss)
+  concat.write_raw(x_ss)
+  let digest = @crypto.fixed_to_bytes(@xcrypto.sha256(concat.to_bytes()))
+  let w = @wire.Writer::new(size_hint=40)
+  w.write_string(digest[:])
+  w.to_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +528,9 @@ pub fn shared_secret_mpint(k_raw : BytesView) -> Bytes {
 /// H = SHA256(string(V_C) || string(V_S) || string(I_C) || string(I_S)
 ///            || string(K_S) || string(Q_C) || string(Q_S) || mpint(K)).
 /// `v_c` / `v_s` are the version strings without CR LF; `i_c` / `i_s` are
-/// the full KEXINIT payloads; `k_mpint` is the wire mpint from
+/// the full KEXINIT payloads; `k_encoded` is the wire-encoded shared
+/// secret from the negotiated method (an `mpint` for curve25519, a
+/// `string` for the ML-KEM hybrid) — see
 /// `shared_secret_mpint` and is appended as-is.
 pub fn exchange_hash(
   v_c~ : Bytes,
@@ -341,7 +540,7 @@ pub fn exchange_hash(
   k_s~ : Bytes,
   q_c~ : Bytes,
   q_s~ : Bytes,
-  k_mpint~ : Bytes,
+  k_encoded~ : Bytes,
 ) -> Bytes {
   let w = @wire.Writer::new(size_hint=512)
   w.write_string(v_c[:])
@@ -351,7 +550,7 @@ pub fn exchange_hash(
   w.write_string(k_s[:])
   w.write_string(q_c[:])
   w.write_string(q_s[:])
-  w.write_raw(k_mpint[:])
+  w.write_raw(k_encoded[:])
   @crypto.fixed_to_bytes(@xcrypto.sha256(w.to_bytes()))
 }
 
@@ -389,11 +588,11 @@ pub fn verify_exchange_hash(
 ///|
 /// K1 = HASH(K || H || X || session_id), K2 = HASH(K || H || K1),
 /// K3 = HASH(K || H || K1 || K2), ...; the concatenation truncated to
-/// `len` bytes. `k_mpint` is the full wire mpint of the shared secret
+/// `len` bytes. `k_encoded` is the wire-encoded shared secret
 /// (length prefix included) as produced by `shared_secret_mpint`;
 /// `letter` is the ASCII key letter 'A'..'F'.
 pub fn derive_key(
-  k_mpint : BytesView,
+  k_encoded : BytesView,
   h : BytesView,
   session_id : BytesView,
   letter : Byte,
@@ -401,9 +600,9 @@ pub fn derive_key(
 ) -> Bytes {
   guard len >= 0 else { abort("derive_key: negative length") }
   let seed = @wire.Writer::new(
-    size_hint=k_mpint.length() + h.length() + 1 + session_id.length(),
+    size_hint=k_encoded.length() + h.length() + 1 + session_id.length(),
   )
-  seed.write_raw(k_mpint)
+  seed.write_raw(k_encoded)
   seed.write_raw(h)
   seed.write_byte(letter)
   seed.write_raw(session_id)
@@ -412,9 +611,9 @@ pub fn derive_key(
   out.write_raw(block[:])
   while out.length() < len {
     let next = @wire.Writer::new(
-      size_hint=k_mpint.length() + h.length() + out.length(),
+      size_hint=k_encoded.length() + h.length() + out.length(),
     )
-    next.write_raw(k_mpint)
+    next.write_raw(k_encoded)
     next.write_raw(h)
     next.write_raw(out.to_bytes()[:])
     block = @crypto.fixed_to_bytes(@xcrypto.sha256(next.to_bytes()))
@@ -443,13 +642,13 @@ pub const CHACHA20_POLY1305_KEY_LEN : Int = 64
 /// Derive the C and D keys. On the first (and, for us, only) key exchange
 /// `session_id` equals `h`.
 pub fn derive_session_keys(
-  k_mpint : BytesView,
+  k_encoded : BytesView,
   h : BytesView,
   session_id : BytesView,
 ) -> SessionKeys {
   {
-    c: derive_key(k_mpint, h, session_id, b'C', CHACHA20_POLY1305_KEY_LEN),
-    d: derive_key(k_mpint, h, session_id, b'D', CHACHA20_POLY1305_KEY_LEN),
+    c: derive_key(k_encoded, h, session_id, b'C', CHACHA20_POLY1305_KEY_LEN),
+    d: derive_key(k_encoded, h, session_id, b'D', CHACHA20_POLY1305_KEY_LEN),
   }
 }
 
