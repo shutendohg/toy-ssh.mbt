@@ -395,6 +395,22 @@ pub fn mlkem768_keygen(d : BytesView, z : BytesView) -> (Bytes, Bytes) {
 }
 
 ///|
+/// Whether an encapsulation key is well formed (FIPS 203 section 7.2's
+/// modulus check): its 12-bit coefficients must all be below q, which
+/// holds exactly when re-encoding the decoded key reproduces it.
+///
+/// A peer-supplied key goes through this first: a malformed one would make
+/// two implementations derive different secrets rather than fail, so the
+/// caller must be able to refuse it without hitting an abort.
+pub fn mlkem768_encaps_key_is_valid(ek : BytesView) -> Bool {
+  if ek.length() != MLKEM768_ENCAPS_KEY_LEN {
+    return false
+  }
+  let t_len = MLKEM768_K * MLKEM_POLY_BYTES
+  encode_vector(decode_vector(ek[0:t_len], 12), 12) == ek[0:t_len].to_owned()
+}
+
+///|
 /// `ML-KEM.Encaps_internal` (Algorithm 17) with the 32-byte message `m`
 /// supplied by the caller. Returns `(ciphertext, shared secret)`.
 ///
@@ -408,9 +424,7 @@ pub fn mlkem768_encaps(ek : BytesView, m : BytesView) -> (Bytes, Bytes) {
     )
   }
   guard m.length() == 32 else { abort("mlkem768_encaps: m must be 32 bytes") }
-  let t_len = MLKEM768_K * MLKEM_POLY_BYTES
-  guard encode_vector(decode_vector(ek[0:t_len], 12), 12) ==
-    ek[0:t_len].to_owned() else {
+  guard mlkem768_encaps_key_is_valid(ek) else {
     abort("mlkem768_encaps: malformed encapsulation key")
   }
   let (k, r) = mlkem_g((m.to_owned() + mlkem_h(ek))[:])

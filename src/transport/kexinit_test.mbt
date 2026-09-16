@@ -28,12 +28,12 @@ test "KexInit::for_role: byte-exact client payload (oracle: python struct)" {
   let cookie = Bytes::make(16, b'\x11')
   let ki = @transport.KexInit::for_role(Client, cookie~)
   let payload = ki.encode()
-  assert_eq(payload.length(), 214)
+  assert_eq(payload.length(), 236)
   assert_eq(payload[0], @transport.SSH_MSG_KEXINIT)
   inspect(
     @hex.encode(payload[:]),
     content=(
-      #|14111111111111111111111111111111110000004b637572766532353531392d7368613235362c637572766532353531392d736861323536406c69627373682e6f72672c6b65782d7374726963742d632d763030406f70656e7373682e636f6d0000000b7373682d656432353531390000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000000000000000000000046e6f6e65000000046e6f6e6500000000000000000000000000
+      #|1411111111111111111111111111111111000000616d6c6b656d3736387832353531392d7368613235362c637572766532353531392d7368613235362c637572766532353531392d736861323536406c69627373682e6f72672c6b65782d7374726963742d632d763030406f70656e7373682e636f6d0000000b7373682d656432353531390000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000000000000000000000046e6f6e65000000046e6f6e6500000000000000000000000000
     ),
   )
 }
@@ -47,6 +47,7 @@ test "KexInit::for_role: server differs from client only in the strict-kex marke
     c.kex_algorithms,
     content=(
       #|[
+      #|  "mlkem768x25519-sha256",
       #|  "curve25519-sha256",
       #|  "curve25519-sha256@libssh.org",
       #|  "kex-strict-c-v00@openssh.com",
@@ -57,6 +58,7 @@ test "KexInit::for_role: server differs from client only in the strict-kex marke
     s.kex_algorithms,
     content=(
       #|[
+      #|  "mlkem768x25519-sha256",
       #|  "curve25519-sha256",
       #|  "curve25519-sha256@libssh.org",
       #|  "kex-strict-s-v00@openssh.com",
@@ -128,7 +130,7 @@ test "KexInit::decode: rejects wrong message number, truncation, trailing bytes"
   )
   expect_err(
     good[0:40].to_owned(),
-    "ProtocolError(\"KEXINIT: ShortRead(need=75, have=19)\")",
+    "ProtocolError(\"KEXINIT: ShortRead(need=97, have=19)\")",
   )
   expect_err(good + b"\x00", "ProtocolError(\"KEXINIT: 1 trailing byte(s)\")")
 }

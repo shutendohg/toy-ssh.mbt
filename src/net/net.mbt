@@ -87,11 +87,13 @@ fn random_fill(seed : Bytes) -> (Int) -> Bytes {
 pub async fn client_config(
   accept_host_key~ : (Bytes) -> Bool,
 ) -> @transport.TransportConfig {
-  let r = random_bytes(16 + 32 + 32)
+  // 16 cookie, 32 X25519 scalar, 32 padding seed, 64 ML-KEM key pair seed.
+  let r = random_bytes(16 + 32 + 32 + 64)
   {
     role: Client,
     cookie: r[0:16].to_owned(),
     ephemeral_scalar: r[16:48].to_owned(),
+    kem_random: r[80:144].to_owned(),
     host_seed: None,
     fill: random_fill(r[48:80].to_owned()),
     accept_host_key,
@@ -102,11 +104,13 @@ pub async fn client_config(
 /// A server `TransportConfig` with fresh randomness and the given 32-byte
 /// Ed25519 host key seed.
 pub async fn server_config(host_seed~ : Bytes) -> @transport.TransportConfig {
-  let r = random_bytes(16 + 32 + 32)
+  // 16 cookie, 32 X25519 scalar, 32 padding seed, 32 ML-KEM message.
+  let r = random_bytes(16 + 32 + 32 + 32)
   {
     role: Server,
     cookie: r[0:16].to_owned(),
     ephemeral_scalar: r[16:48].to_owned(),
+    kem_random: r[80:112].to_owned(),
     host_seed: Some(host_seed),
     fill: random_fill(r[48:80].to_owned()),
     accept_host_key: _ => true,

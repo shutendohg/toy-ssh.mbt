@@ -16,6 +16,10 @@ pub(all) struct TransportConfig {
   cookie : Bytes
   /// 32 random bytes: our ephemeral X25519 scalar.
   ephemeral_scalar : Bytes
+  /// Randomness for a key exchange that needs a key encapsulation:
+  /// `KEM_CLIENT_RANDOM_LEN` bytes on the client, `KEM_SERVER_RANDOM_LEN`
+  /// on the server. Unused by `curve25519-sha256`.
+  kem_random : Bytes
   /// Server only: the 32-byte Ed25519 host key seed.
   host_seed : Bytes?
   /// Padding filler (random in production, `zero_padding` in tests).
@@ -82,6 +86,9 @@ pub struct Transport {
   cfg : TransportConfig
   /// Server: the expanded host key. Client: `None`.
   host_key : @crypto.Ed25519KeyPair?
+  /// Client: what the key exchange must remember between its two
+  /// messages.
+  mut kex_client_state : KexClientState?
   mut state : State
   mut inbuf : Bytes
   outbuf : @buffer.Buffer
@@ -132,6 +139,7 @@ pub fn Transport::new(cfg : TransportConfig) -> Transport {
   let t = {
     cfg,
     host_key,
+    kex_client_state: None,
     state: VersionWait,
     inbuf: b"",
     outbuf: @buffer.Buffer(size_hint=1024),
@@ -402,9 +410,13 @@ fn Transport::on_kexinit(
   self.negotiated = Some(negotiated)
   self.state = KexWait
   if self.cfg.role == Client {
-    let init : KexEcdhInit = {
-      q_c: kex_client_public(self.kex_method(), self.cfg.ephemeral_scalar[:]),
-    }
+    let (blob, state) = kex_client_init(
+      self.kex_method(),
+      self.cfg.ephemeral_scalar[:],
+      self.cfg.kem_random[:],
+    )
+    let init : KexEcdhInit = { q_c: blob, }
+    self.kex_client_state = Some(state)
     self.send_plain(init.encode())
   }
 }
@@ -419,6 +431,7 @@ fn Transport::on_ecdh_init(
   let (q_s, k_encoded) = kex_server_exchange(
     self.kex_method(),
     self.cfg.ephemeral_scalar[:],
+    self.cfg.kem_random[:],
     init.q_c[:],
   )
   guard self.host_key is Some(host_key) else {
@@ -456,12 +469,15 @@ fn Transport::on_ecdh_reply(
     raise ProtocolError("host key rejected")
   }
   let kex = self.kex_method()
-  let q_c = kex_client_public(kex, self.cfg.ephemeral_scalar[:])
-  let k_encoded = kex_client_shared(
+  guard self.kex_client_state is Some(state) else {
+    abort("client without a key exchange in flight")
+  }
+  let (q_c, _) = kex_client_init(
     kex,
     self.cfg.ephemeral_scalar[:],
-    reply.q_s[:],
+    self.cfg.kem_random[:],
   )
+  let k_encoded = kex_client_shared(kex, state, reply.q_s[:])
   let h = exchange_hash(
     v_c=@ascii.encode(OUR_VERSION),
     v_s=self.peer_version,
