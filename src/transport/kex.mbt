@@ -227,8 +227,19 @@ pub(all) enum KexMethod {
 /// from.
 pub struct KexClientState {
   scalar : Bytes
+  /// The blob we sent, kept because the exchange hash needs it again when
+  /// the reply arrives. Rebuilding it would mean a second ML-KEM key
+  /// generation, the most expensive step in the handshake.
+  public : Bytes
   /// The hybrid's ML-KEM decapsulation key, if this method has one.
   decaps_key : Bytes?
+}
+
+///|
+/// The blob we sent in `KEX_ECDH_INIT`, which is also `Q_C` in the
+/// exchange hash.
+pub fn KexClientState::public(self : KexClientState) -> Bytes {
+  self.public
 }
 
 ///|
@@ -262,11 +273,13 @@ pub fn kex_client_init(
   kem_random : BytesView,
 ) -> (Bytes, KexClientState) {
   match kex {
-    Curve25519 =>
+    Curve25519 => {
+      let public = ecdh_public(ephemeral_scalar)
       (
-        ecdh_public(ephemeral_scalar),
-        { scalar: ephemeral_scalar.to_owned(), decaps_key: None, },
+        public,
+        { scalar: ephemeral_scalar.to_owned(), public, decaps_key: None, },
       )
+    }
     MlKem768X25519 => {
       guard kem_random.length() >= KEM_CLIENT_RANDOM_LEN else {
         abort(
@@ -277,9 +290,10 @@ pub fn kex_client_init(
         kem_random[0:32],
         kem_random[32:64],
       )
+      let public = ek + ecdh_public(ephemeral_scalar)
       (
-        ek + ecdh_public(ephemeral_scalar),
-        { scalar: ephemeral_scalar.to_owned(), decaps_key: Some(dk), },
+        public,
+        { scalar: ephemeral_scalar.to_owned(), public, decaps_key: Some(dk), },
       )
     }
   }

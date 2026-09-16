@@ -472,11 +472,9 @@ fn Transport::on_ecdh_reply(
   guard self.kex_client_state is Some(state) else {
     abort("client without a key exchange in flight")
   }
-  let (q_c, _) = kex_client_init(
-    kex,
-    self.cfg.ephemeral_scalar[:],
-    self.cfg.kem_random[:],
-  )
+  // From the state, not recomputed: for the hybrid, rebuilding the blob
+  // would run a second ML-KEM key generation.
+  let q_c = state.public()
   let k_encoded = kex_client_shared(kex, state, reply.q_s[:])
   let h = exchange_hash(
     v_c=@ascii.encode(OUR_VERSION),
