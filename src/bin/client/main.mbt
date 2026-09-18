@@ -5,7 +5,7 @@
 ///
 /// ```
 /// client [-p PORT] [-i KEYFILE] [--known-hosts FILE] [--password PW]
-///        [--strict-host-key-checking] [USER@]HOST [COMMAND]
+///        [--strict-host-key-checking] [-c CIPHER] [USER@]HOST [COMMAND]
 /// ```
 ///
 /// With a COMMAND the client runs it and exits with its status, like
@@ -13,6 +13,10 @@
 /// this process's standard input to it (no PTY, so no line editing).
 /// The command's standard output goes to ours verbatim; diagnostics go to
 /// standard error.
+///
+/// `-c` pins one cipher (`chacha20-poly1305@openssh.com` or `aes128-ctr`)
+/// instead of offering both, which is how the docs/07 interop runs exercise
+/// each suite.
 ///
 /// Host keys are trusted on first use and appended to the known_hosts file
 /// unless `--strict-host-key-checking` is given. A changed host key is
@@ -32,6 +36,8 @@ struct ClientOptions {
   strict : Bool
   /// The command to run, or `None` to ask for the remote shell.
   command : String?
+  /// The only cipher to offer, or `None` for our default preference.
+  cipher : String?
 }
 
 ///|
@@ -159,7 +165,13 @@ async fn main {
   let conn = @socket.Tcp::connect(addr)
   defer conn.close()
   @net.log("toy-ssh client: connected to \{addr}")
-  let t = @transport.Transport::new(@net.client_config(accept_host_key~))
+  let ciphers = match opts.cipher {
+    Some(name) => Some([name])
+    None => None
+  }
+  let t = @transport.Transport::new(
+    @net.client_config(accept_host_key~, ciphers~),
+  )
   let c = @net.Conn::new(conn, t)
   let mut auth : @auth.AuthClient? = None
   let mut authenticated = false
@@ -378,13 +390,14 @@ fn parse_args(args : Array[String]) -> ClientOptions {
   let mut strict = false
   let mut target : String? = None
   let mut command : String? = None
+  let mut cipher : String? = None
   let mut i = 1
   while i < args.length() {
     let flag = args[i]
     match flag {
       "--help" => {
         println(
-          "usage: client [-p PORT] [-i KEYFILE] [--known-hosts FILE] [--password PW] [--strict-host-key-checking] [USER@]HOST [COMMAND]",
+          "usage: client [-p PORT] [-i KEYFILE] [--known-hosts FILE] [--password PW] [--strict-host-key-checking] [-c CIPHER] [USER@]HOST [COMMAND]",
         )
         @sys.exit(0)
       }
@@ -419,13 +432,32 @@ fn parse_args(args : Array[String]) -> ClientOptions {
       "-i" => key_path = Some(value)
       "--known-hosts" => known_hosts_path = value
       "--password" => password = Some(value)
+      "-c" =>
+        if value == @transport.CIPHER_CHACHA20_POLY1305 ||
+          value == @transport.CIPHER_AES128_CTR {
+          cipher = Some(value)
+        } else {
+          usage_error(
+            "unknown cipher: \{value} (\{@transport.CIPHER_CHACHA20_POLY1305} or \{@transport.CIPHER_AES128_CTR})",
+          )
+        }
       _ => usage_error("unknown argument: \{flag}")
     }
     i = i + 2
   }
   guard target is Some(target) else { usage_error("expected [USER@]HOST") }
   let (user, host) = split_target(target)
-  { user, host, port, key_path, known_hosts_path, password, strict, command, }
+  {
+    user,
+    host,
+    port,
+    key_path,
+    known_hosts_path,
+    password,
+    strict,
+    command,
+    cipher,
+  }
 }
 
 ///|

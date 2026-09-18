@@ -21,9 +21,10 @@ pub(all) struct KexInit {
 } derive(Debug, Eq)
 
 ///|
-/// Our single suite (docs/00, docs/02 section 3). The kex list carries the
-/// role-specific strict-kex marker; the MAC lists are deliberately empty
-/// because chacha20-poly1305@openssh.com is AEAD.
+/// The algorithms we advertise (docs/00, docs/02 section 3, docs/06 M5).
+/// The kex list carries the role-specific strict-kex marker. The AEAD
+/// cipher stays first; `aes128-ctr` + `hmac-sha2-256` is the fallback a
+/// peer has to ask for, and the MAC lists exist only for it.
 pub const KEX_MLKEM768X25519_SHA256 : String = "mlkem768x25519-sha256"
 
 ///|
@@ -45,16 +46,35 @@ pub const HOSTKEY_ED25519 : String = "ssh-ed25519"
 pub const CIPHER_CHACHA20_POLY1305 : String = "chacha20-poly1305@openssh.com"
 
 ///|
+pub const CIPHER_AES128_CTR : String = "aes128-ctr"
+
+///|
+pub const MAC_HMAC_SHA2_256 : String = "hmac-sha2-256"
+
+///|
 pub const COMPRESSION_NONE : String = "none"
 
 ///|
 /// The KEXINIT we advertise for `role`. `cookie` must be 16 random bytes;
-/// it is a parameter so this codec stays free of randomness.
-pub fn KexInit::for_role(role : Role, cookie~ : Bytes) -> KexInit {
+/// it is a parameter so this codec stays free of randomness. `ciphers`
+/// replaces the cipher lists when given, which is how a caller pins one
+/// suite (docs/07 interop runs both of them).
+pub fn KexInit::for_role(
+  role : Role,
+  cookie~ : Bytes,
+  ciphers? : Array[String]? = None,
+) -> KexInit {
   guard cookie.length() == 16 else { abort("KEXINIT cookie must be 16 bytes") }
   let strict = match role {
     Client => KEX_STRICT_CLIENT
     Server => KEX_STRICT_SERVER
+  }
+  let ciphers = match ciphers {
+    Some(list) => {
+      guard list.length() > 0 else { abort("KEXINIT: empty cipher list") }
+      list
+    }
+    None => [CIPHER_CHACHA20_POLY1305, CIPHER_AES128_CTR]
   }
   {
     cookie,
@@ -67,10 +87,11 @@ pub fn KexInit::for_role(role : Role, cookie~ : Bytes) -> KexInit {
       strict,
     ],
     server_host_key_algorithms: [HOSTKEY_ED25519],
-    encryption_client_to_server: [CIPHER_CHACHA20_POLY1305],
-    encryption_server_to_client: [CIPHER_CHACHA20_POLY1305],
-    mac_client_to_server: [],
-    mac_server_to_client: [],
+    encryption_client_to_server: ciphers,
+    encryption_server_to_client: ciphers,
+    // Only the second cipher needs one; an AEAD peer ignores these lists.
+    mac_client_to_server: [MAC_HMAC_SHA2_256],
+    mac_server_to_client: [MAC_HMAC_SHA2_256],
     compression_client_to_server: [COMPRESSION_NONE],
     compression_server_to_client: [COMPRESSION_NONE],
     languages_client_to_server: [],

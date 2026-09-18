@@ -22,6 +22,9 @@ pub(all) struct TransportConfig {
   kem_random : Bytes
   /// Server only: the 32-byte Ed25519 host key seed.
   host_seed : Bytes?
+  /// The ciphers to advertise, most preferred first. `None` advertises the
+  /// default list (`chacha20-poly1305@openssh.com`, then `aes128-ctr`).
+  ciphers : Array[String]?
   /// Padding filler (random in production, `zero_padding` in tests).
   fill : (Int) -> Bytes
   /// Client only: called with the server's host key blob `K_S`; returning
@@ -99,6 +102,8 @@ pub struct Transport {
   mut peer_kexinit : KexInit?
   mut peer_kexinit_payload : Bytes
   mut negotiated : Negotiated?
+  /// The record-layer method the negotiation settled on.
+  mut cipher : CipherMethod?
   mut session_id : Bytes?
   mut keys : SessionKeys?
   /// Plaintext packet counters; they seed the record-layer sequence
@@ -132,7 +137,11 @@ pub fn Transport::new(cfg : TransportConfig) -> Transport {
       None
     }
   }
-  let our_kexinit = KexInit::for_role(cfg.role, cookie=cfg.cookie)
+  let our_kexinit = KexInit::for_role(
+    cfg.role,
+    cookie=cfg.cookie,
+    ciphers=cfg.ciphers,
+  )
   let our_kexinit_payload = our_kexinit.encode() catch {
     _ => abort("Transport: our own KEXINIT does not encode")
   }
@@ -149,6 +158,7 @@ pub fn Transport::new(cfg : TransportConfig) -> Transport {
     peer_kexinit: None,
     peer_kexinit_payload: b"",
     negotiated: None,
+    cipher: None,
     session_id: None,
     keys: None,
     plain_send_seq: 0,
@@ -197,6 +207,16 @@ fn Transport::kex_method(self : Transport) -> KexMethod {
     Some(k) => k
     None => abort("Transport: negotiated an unimplemented kex \{n.kex}")
   }
+}
+
+///|
+/// The record-layer method the negotiation settled on. Set together with
+/// `negotiated`, so anything after the negotiation can rely on it.
+fn Transport::cipher_method(self : Transport) -> CipherMethod {
+  guard self.cipher is Some(c) else {
+    abort("Transport: record layer before negotiation")
+  }
+  c
 }
 
 ///|
@@ -408,6 +428,9 @@ fn Transport::on_kexinit(
   self.peer_kexinit = Some(peer)
   self.peer_kexinit_payload = payload
   self.negotiated = Some(negotiated)
+  // Resolve the record layer now, so an impossible combination fails as a
+  // key exchange failure rather than at NEWKEYS.
+  self.cipher = Some(negotiated.cipher_method())
   self.state = KexWait
   if self.cfg.role == Client {
     let (blob, state) = kex_client_init(
@@ -497,11 +520,12 @@ fn Transport::finish_kex(
   k_encoded : Bytes,
   h : Bytes,
 ) -> Unit {
-  let keys = derive_session_keys(k_encoded[:], h[:], h[:])
+  let suite = self.cipher_method()
+  let keys = derive_session_keys(suite, k_encoded[:], h[:], h[:])
   self.session_id = Some(h)
   self.keys = Some(keys)
   self.send_plain(Bytes::make(1, SSH_MSG_NEWKEYS))
-  let rec = RecordState::new(keys.send_key(self.cfg.role)[:])
+  let rec = RecordState::new(suite, keys.send_keys(self.cfg.role))
   if !self.strict_kex() {
     rec.seq = self.plain_send_seq
   }
@@ -523,7 +547,10 @@ fn Transport::on_newkeys(
   guard self.keys is Some(keys) && self.session_id is Some(session_id) else {
     abort("NEWKEYS before keys were derived")
   }
-  let rec = RecordState::new(keys.recv_key(self.cfg.role)[:])
+  let rec = RecordState::new(
+    self.cipher_method(),
+    keys.recv_keys(self.cfg.role),
+  )
   if !self.strict_kex() {
     rec.seq = self.plain_recv_seq
   }

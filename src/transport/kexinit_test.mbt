@@ -28,12 +28,12 @@ test "KexInit::for_role: byte-exact client payload (oracle: python struct)" {
   let cookie = Bytes::make(16, b'\x11')
   let ki = @transport.KexInit::for_role(Client, cookie~)
   let payload = ki.encode()
-  assert_eq(payload.length(), 236)
+  assert_eq(payload.length(), 284)
   assert_eq(payload[0], @transport.SSH_MSG_KEXINIT)
   inspect(
     @hex.encode(payload[:]),
     content=(
-      #|1411111111111111111111111111111111000000616d6c6b656d3736387832353531392d7368613235362c637572766532353531392d7368613235362c637572766532353531392d736861323536406c69627373682e6f72672c6b65782d7374726963742d632d763030406f70656e7373682e636f6d0000000b7373682d656432353531390000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000000000000000000000046e6f6e65000000046e6f6e6500000000000000000000000000
+      #|1411111111111111111111111111111111000000616d6c6b656d3736387832353531392d7368613235362c637572766532353531392d7368613235362c637572766532353531392d736861323536406c69627373682e6f72672c6b65782d7374726963742d632d763030406f70656e7373682e636f6d0000000b7373682d656432353531390000002863686163686132302d706f6c7931333035406f70656e7373682e636f6d2c6165733132382d6374720000002863686163686132302d706f6c7931333035406f70656e7373682e636f6d2c6165733132382d6374720000000d686d61632d736861322d3235360000000d686d61632d736861322d323536000000046e6f6e65000000046e6f6e6500000000000000000000000000
     ),
   )
 }
@@ -68,15 +68,16 @@ test "KexInit::for_role: server differs from client only in the strict-kex marke
   debug_inspect(s.server_host_key_algorithms, content="[\"ssh-ed25519\"]")
   debug_inspect(
     s.encryption_client_to_server,
-    content="[\"chacha20-poly1305@openssh.com\"]",
+    content="[\"chacha20-poly1305@openssh.com\", \"aes128-ctr\"]",
   )
   debug_inspect(
     s.encryption_server_to_client,
-    content="[\"chacha20-poly1305@openssh.com\"]",
+    content="[\"chacha20-poly1305@openssh.com\", \"aes128-ctr\"]",
   )
-  // MAC lists are empty: the AEAD cipher makes the MAC implicit (docs/02 section 3).
-  debug_inspect(s.mac_client_to_server, content="[]")
-  debug_inspect(s.mac_server_to_client, content="[]")
+  // The MAC lists exist only for aes128-ctr; the AEAD ignores them
+  // (docs/02 section 3, docs/06 M5).
+  debug_inspect(s.mac_client_to_server, content="[\"hmac-sha2-256\"]")
+  debug_inspect(s.mac_server_to_client, content="[\"hmac-sha2-256\"]")
   debug_inspect(s.compression_client_to_server, content="[\"none\"]")
   debug_inspect(s.compression_server_to_client, content="[\"none\"]")
   debug_inspect(s.languages_client_to_server, content="[]")

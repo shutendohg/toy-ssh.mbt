@@ -15,13 +15,16 @@
 // ---------------------------------------------------------------------------
 
 ///|
-/// Outcome of KEXINIT negotiation. MAC slots are absent on purpose: the only
-/// cipher is AEAD, so the MAC is implicit (docs/02 section 3).
+/// Outcome of KEXINIT negotiation. A MAC slot is the empty string when the
+/// chosen cipher is AEAD: RFC 4253's MAC has no meaning there, and no MAC
+/// algorithm is negotiated for it (docs/02 section 3).
 pub(all) struct Negotiated {
   kex : String
   host_key : String
   cipher_client_to_server : String
   cipher_server_to_client : String
+  mac_client_to_server : String
+  mac_server_to_client : String
   compression_client_to_server : String
   compression_server_to_client : String
   /// True only when both sides advertised their role's strict-kex marker.
@@ -45,6 +48,19 @@ fn first_common(client : Array[String], server : Array[String]) -> String? {
     }
   }
   None
+}
+
+///|
+/// Whether a cipher name needs a MAC negotiated alongside it. Listed by
+/// name rather than probed through `cipher_method`, which would need a MAC
+/// name to probe with and so would silently answer `false` for a future
+/// suite that uses a different one. An unknown name answers `false`: it is
+/// no cipher of ours, and `pick` has already failed by the time it matters.
+fn needs_mac(cipher : String) -> Bool {
+  match cipher {
+    CIPHER_AES128_CTR => true
+    _ => false
+  }
 }
 
 ///|
@@ -84,23 +100,51 @@ pub fn negotiate(
   let server_kex = server.kex_algorithms.filter(n => !is_strict_marker(n))
   let strict_kex = client.kex_algorithms.contains(KEX_STRICT_CLIENT) &&
     server.kex_algorithms.contains(KEX_STRICT_SERVER)
+  // RFC 4253 section 7.1 settles the kex first, and a kex mismatch is the
+  // more useful thing to report when several slots are empty at once.
+  let kex = pick(client_kex, server_kex, "kex algorithm")
+  let host_key = pick(
+    client.server_host_key_algorithms,
+    server.server_host_key_algorithms,
+    "host key algorithm",
+  )
+  let cipher_c2s = pick(
+    client.encryption_client_to_server,
+    server.encryption_client_to_server,
+    "cipher client->server",
+  )
+  let cipher_s2c = pick(
+    client.encryption_server_to_client,
+    server.encryption_server_to_client,
+    "cipher server->client",
+  )
+  // A MAC is negotiated only for a cipher that needs one; an AEAD peer is
+  // allowed to advertise no MAC at all.
+  let mac_c2s = if needs_mac(cipher_c2s) {
+    pick(
+      client.mac_client_to_server,
+      server.mac_client_to_server,
+      "MAC client->server",
+    )
+  } else {
+    ""
+  }
+  let mac_s2c = if needs_mac(cipher_s2c) {
+    pick(
+      client.mac_server_to_client,
+      server.mac_server_to_client,
+      "MAC server->client",
+    )
+  } else {
+    ""
+  }
   {
-    kex: pick(client_kex, server_kex, "kex algorithm"),
-    host_key: pick(
-      client.server_host_key_algorithms,
-      server.server_host_key_algorithms,
-      "host key algorithm",
-    ),
-    cipher_client_to_server: pick(
-      client.encryption_client_to_server,
-      server.encryption_client_to_server,
-      "cipher client->server",
-    ),
-    cipher_server_to_client: pick(
-      client.encryption_server_to_client,
-      server.encryption_server_to_client,
-      "cipher server->client",
-    ),
+    kex,
+    host_key,
+    cipher_client_to_server: cipher_c2s,
+    cipher_server_to_client: cipher_s2c,
+    mac_client_to_server: mac_c2s,
+    mac_server_to_client: mac_s2c,
     compression_client_to_server: pick(
       client.compression_client_to_server,
       server.compression_client_to_server,
@@ -112,6 +156,31 @@ pub fn negotiate(
       "compression server->client",
     ),
     strict_kex,
+  }
+}
+
+///|
+/// The record-layer method both directions will run on.
+///
+/// Deliberate toy limitation: the two directions must agree. SSH allows
+/// them to differ, but a peer only ends up here by advertising disjoint
+/// preferences on purpose, and one method per connection keeps the key
+/// derivation and the record layer a single case.
+pub fn Negotiated::cipher_method(
+  self : Negotiated,
+) -> CipherMethod raise ProtocolError {
+  if self.cipher_client_to_server != self.cipher_server_to_client ||
+    self.mac_client_to_server != self.mac_server_to_client {
+    raise ProtocolError(
+      "negotiate: the two directions must use the same cipher and MAC",
+    )
+  }
+  match cipher_method(self.cipher_client_to_server, self.mac_client_to_server) {
+    Some(m) => m
+    None =>
+      raise ProtocolError(
+        "negotiate: unsupported cipher/MAC \{self.cipher_client_to_server}/\{self.mac_client_to_server}",
+      )
   }
 }
 
@@ -623,14 +692,11 @@ pub fn derive_key(
 }
 
 ///|
-/// The encryption keys for `chacha20-poly1305@openssh.com`: 64 bytes each.
-/// Only 'C' (client->server) and 'D' (server->client) are derived. The IV
-/// letters 'A'/'B' and MAC letters 'E'/'F' are not used by the AEAD (its
-/// nonce comes from the sequence number and its Poly1305 key from the
-/// stream), so they are deliberately not computed.
+/// Both directions' key material. On the first (and, for us, only) key
+/// exchange `session_id` equals `h`.
 pub(all) struct SessionKeys {
-  c : Bytes
-  d : Bytes
+  c2s : DirectionKeys
+  s2c : DirectionKeys
 } derive(Debug, Eq)
 
 ///|
@@ -639,33 +705,46 @@ pub(all) struct SessionKeys {
 pub const CHACHA20_POLY1305_KEY_LEN : Int = 64
 
 ///|
-/// Derive the C and D keys. On the first (and, for us, only) key exchange
-/// `session_id` equals `h`.
+/// Derive both directions for `suite`, RFC 4253 section 7.2: IV 'A'/'B',
+/// encryption key 'C'/'D', integrity key 'E'/'F', client-to-server first.
+/// A method that does not use a letter derives 0 bytes for it rather than
+/// deriving and discarding one -- the AEAD has no IV and no MAC key.
 pub fn derive_session_keys(
+  suite : CipherMethod,
   k_encoded : BytesView,
   h : BytesView,
   session_id : BytesView,
 ) -> SessionKeys {
+  let (iv_len, enc_len, mac_len) = suite.key_lengths()
+  let letter = (l, len) => derive_key(k_encoded, h, session_id, l, len)
   {
-    c: derive_key(k_encoded, h, session_id, b'C', CHACHA20_POLY1305_KEY_LEN),
-    d: derive_key(k_encoded, h, session_id, b'D', CHACHA20_POLY1305_KEY_LEN),
+    c2s: {
+      iv: letter(b'A', iv_len),
+      enc: letter(b'C', enc_len),
+      mac: letter(b'E', mac_len),
+    },
+    s2c: {
+      iv: letter(b'B', iv_len),
+      enc: letter(b'D', enc_len),
+      mac: letter(b'F', mac_len),
+    },
   }
 }
 
 ///|
-/// The key `role` encrypts with: client sends with C, server with D.
-pub fn SessionKeys::send_key(self : SessionKeys, role : Role) -> Bytes {
+/// The keys `role` encrypts with: client sends client-to-server.
+pub fn SessionKeys::send_keys(self : SessionKeys, role : Role) -> DirectionKeys {
   match role {
-    Client => self.c
-    Server => self.d
+    Client => self.c2s
+    Server => self.s2c
   }
 }
 
 ///|
-/// The key `role` decrypts with: the mirror of `send_key`.
-pub fn SessionKeys::recv_key(self : SessionKeys, role : Role) -> Bytes {
+/// The keys `role` decrypts with: the mirror of `send_keys`.
+pub fn SessionKeys::recv_keys(self : SessionKeys, role : Role) -> DirectionKeys {
   match role {
-    Client => self.d
-    Server => self.c
+    Client => self.s2c
+    Server => self.c2s
   }
 }

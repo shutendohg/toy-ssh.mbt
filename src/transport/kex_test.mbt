@@ -23,6 +23,8 @@ test "negotiate: happy path as client against our own server KEXINIT" {
       #|  host_key: "ssh-ed25519",
       #|  cipher_client_to_server: "chacha20-poly1305@openssh.com",
       #|  cipher_server_to_client: "chacha20-poly1305@openssh.com",
+      #|  mac_client_to_server: "",
+      #|  mac_server_to_client: "",
       #|  compression_client_to_server: "none",
       #|  compression_server_to_client: "none",
       #|  strict_kex: true,
@@ -116,7 +118,7 @@ test "negotiate: each slot with no common algorithm is a ProtocolError" {
   )
   expect_err(
     Client,
-    { ..server, encryption_client_to_server: ["aes128-ctr"], },
+    { ..server, encryption_client_to_server: ["aes256-gcm@openssh.com"], },
     "ProtocolError(\"negotiate: no common cipher client->server\")",
   )
   expect_err(
@@ -506,7 +508,9 @@ test "kex dance: both sides agree on H and the host signature verifies" {
   // changed for a reason before updating it.
   inspect(
     @hex.encode(h_cli[:]),
-    content="abb5d90b5920cf5e2b4e00afc3f10b96d357a7ece4dc2c772e2f64fc0730d085",
+    content=(
+      #|7edb9505de14ea8c72e4fb6896146eafad84a5de30b081852ad03bc85698f826
+    ),
   )
 }
 
@@ -619,27 +623,69 @@ test "derive_session_keys: pinned C/D keys from the fixed-input dance" {
     @transport.shared_secret(hx(ALICE_SK)[:], hx(BOB_PK)[:])[:],
   )
   // First kex: session_id == H.
-  let keys = @transport.derive_session_keys(k[:], h[:], h[:])
-  inspect(keys.c.length(), content="64")
-  inspect(keys.d.length(), content="64")
-  assert_eq(keys.c, @transport.derive_key(k[:], h[:], h[:], b'C', 64))
-  assert_eq(keys.d, @transport.derive_key(k[:], h[:], h[:], b'D', 64))
+  let keys = @transport.derive_session_keys(ChaCha20Poly1305, k[:], h[:], h[:])
+  let c = keys.c2s.enc
+  let d = keys.s2c.enc
+  inspect(c.length(), content="64")
+  inspect(d.length(), content="64")
+  assert_eq(c, @transport.derive_key(k[:], h[:], h[:], b'C', 64))
+  assert_eq(d, @transport.derive_key(k[:], h[:], h[:], b'D', 64))
+  // The AEAD has no IV and no separate MAC key, so neither is derived.
+  assert_eq(keys.c2s.iv, b"")
+  assert_eq(keys.c2s.mac, b"")
+  assert_eq(keys.s2c.iv, b"")
+  assert_eq(keys.s2c.mac, b"")
   // Self-generated regression fixtures (not cross-checked against
   // OpenSSH). They derive from H, so they move with it — see the note on
   // the H fixture above.
   inspect(
-    @hex.encode(keys.c[:]),
-    content="f27eca53176b77ada8ef1099aa3e95197b588e6cac7facff2784429d615e09da4ab9c793edfb1f18b97f32d123dff273dba2e89e26b0db34d64990b05d6228d0",
+    @hex.encode(c[:]),
+    content=(
+      #|1efb9b106b90512bd4307fcc618e5e34866ce06edd37b97dd304e17587a96f9587e4e816599f8321fbd0daf43a908de3a9cbcbda35f9826375a05648a954f1b3
+    ),
   )
   inspect(
-    @hex.encode(keys.d[:]),
-    content="7a3598cbf25c5f57bcd55532a0a84d06d63e9887ee88b1bafe3e6cddfd138350627d118ca9c715a37f7ece15b61360fba476bfc588746d829971bc2b89745842",
+    @hex.encode(d[:]),
+    content=(
+      #|58efd805951f377c7dbeba388b6cc75b540d3e549afc9e706202e3ba9cbf081a6d5543926090b9eb3cf8491ec4eb4123bc899bef500680112059e0ee3e17058a
+    ),
   )
   // Role mapping: client sends with C and receives with D; server mirrors.
-  assert_eq(keys.send_key(Client), keys.c)
-  assert_eq(keys.recv_key(Client), keys.d)
-  assert_eq(keys.send_key(Server), keys.d)
-  assert_eq(keys.recv_key(Server), keys.c)
+  assert_eq(keys.send_keys(Client).enc, c)
+  assert_eq(keys.recv_keys(Client).enc, d)
+  assert_eq(keys.send_keys(Server).enc, d)
+  assert_eq(keys.recv_keys(Server).enc, c)
+}
+
+///|
+test "derive_session_keys: aes128-ctr takes all six letters A..F" {
+  let i_c = @transport.KexInit::for_role(
+    Client,
+    cookie=Bytes::make(16, b'\x11'),
+  ).encode()
+  let i_s = @transport.KexInit::for_role(
+    Server,
+    cookie=Bytes::make(16, b'\x22'),
+  ).encode()
+  let (h, _, _, _) = dance(i_c, i_s)
+  let k = @transport.shared_secret_mpint(
+    @transport.shared_secret(hx(ALICE_SK)[:], hx(BOB_PK)[:])[:],
+  )
+  let keys = @transport.derive_session_keys(
+    Aes128CtrHmacSha256,
+    k[:],
+    h[:],
+    h[:],
+  )
+  // RFC 4253 section 7.2: A/B are the IVs, C/D the keys, E/F the MAC keys,
+  // client-to-server first. Getting a letter or a direction wrong still
+  // round-trips against ourselves, so each one is pinned here.
+  assert_eq(keys.c2s.iv, @transport.derive_key(k[:], h[:], h[:], b'A', 16))
+  assert_eq(keys.s2c.iv, @transport.derive_key(k[:], h[:], h[:], b'B', 16))
+  assert_eq(keys.c2s.enc, @transport.derive_key(k[:], h[:], h[:], b'C', 16))
+  assert_eq(keys.s2c.enc, @transport.derive_key(k[:], h[:], h[:], b'D', 16))
+  assert_eq(keys.c2s.mac, @transport.derive_key(k[:], h[:], h[:], b'E', 32))
+  assert_eq(keys.s2c.mac, @transport.derive_key(k[:], h[:], h[:], b'F', 32))
 }
 
 ///|
