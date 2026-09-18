@@ -24,6 +24,8 @@ Explicit non-goals (state these in code comments and READMEs too):
   first `NEWKEYS`), we log it and **close the connection** rather than implement rekey.
 - **No compression, no SFTP/scp subsystem, no agent forwarding, no X11 forwarding.**
 - **One algorithm suite only** (see below). No negotiation fallbacks, no legacy ciphers.
+  (M5 and M6 later added a second cipher suite, `aes128-ctr` + `hmac-sha2-256`, and the
+  hybrid kex `mlkem768x25519-sha256`, both to exercise the negotiation seam.)
 - **Encrypted private keys are not supported** — only unencrypted `openssh-key-v1` keys
   (`cipher="none"`, `kdf="none"`).
 

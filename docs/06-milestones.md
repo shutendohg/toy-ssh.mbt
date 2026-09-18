@@ -167,9 +167,15 @@ Pick any, each independent of the others:
   `shell`. Enables `ssh` interactive without `-T`.
 - **`diffie-hellman-group14-sha256` + `rsa-sha2-256`:** a second kex + host-key suite using
   `mpint` modexp (BigInt). Exercises the negotiation code with >1 real option.
-- **`aes128-ctr` + `hmac-sha2-256`:** a classic encrypt-then-MAC cipher suite (needs AES; the
-  MAC reuses `moonbitlang/x/crypto` HMAC). Exercises the non-AEAD packet path (real MAC keys,
-  separate MAC field).
+- **`aes128-ctr` + `hmac-sha2-256`: done (2026-09-19).** The classic RFC 4253 §6.4 suite —
+  encrypt-and-MAC over the plaintext packet, *not* encrypt-then-MAC (that is the `etm@`
+  variant, still not implemented). AES-128 comes from `moonbitlang/x/crypto` (ECB only, so
+  CTR is ours: encrypt successive counter blocks, RFC 4344 §4 keeps one counter per direction
+  running across packets); the MAC reuses the same package's HMAC. Format and the
+  decrypt-the-length-before-authenticating caveat: [02-transport-spec.md](02-transport-spec.md) §9.
+  Acceptance: NIST SP 800-38A F.5.1 and RFC 4231 vectors, a byte-exact packet fixture built
+  outside this code base (`openssl enc` + Python `hmac`), in-memory self-interop over the
+  suite, and OpenSSH interop both ways (§3f of [07-verification-plan.md](07-verification-plan.md)).
 - **`direct-tcpip` port forwarding:** a second channel type.
 
 Each stretch item should come with its own acceptance test and, where an OpenSSH-comparable

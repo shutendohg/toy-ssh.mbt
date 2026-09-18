@@ -215,6 +215,41 @@ Expected: `sshd` logs `debug1: kex: algorithm: mlkem768x25519-sha256` and
 Verified 2026-09-16 against OpenSSH_10.2p1 in both directions, with the classical exchange
 re-checked in the same run.
 
+### 3f. The `aes128-ctr` + `hmac-sha2-256` suite (M5)
+
+Force the second suite on each side in turn, the same way §3e forces the hybrid kex, so a
+silent fallback to the AEAD cannot pass for success.
+
+**OpenSSH `ssh` → toy server.** Start the toy server as in §3b, then:
+
+```
+ssh -vv -T -p 2222 -c aes128-ctr -m hmac-sha2-256 \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./interop/m5_kh \
+    -o IdentitiesOnly=yes -i ./interop/client_ed25519 \
+    user@127.0.0.1 'echo ctr-hello; exit 3'
+```
+
+Expected: `debug1: kex: client->server cipher: aes128-ctr MAC: hmac-sha2-256` (and the same
+for server->client), the output on stdout, `ssh` exiting 3. Repeat with a bulk command
+(`seq 1 20000`) and compare a checksum: a counter that restarted per packet still passes a
+one-packet test.
+
+**Toy client → OpenSSH `sshd`.** Copy `interop/sshd_config` with `Ciphers aes128-ctr` and
+`MACs hmac-sha2-256`, start `sshd -ddd` on it as in §3c, then pass `-c aes128-ctr` to the toy
+client (without it the client offers the AEAD first and gets it):
+
+```
+client -p 2200 -c aes128-ctr -i ./interop/client_ed25519 \
+       --known-hosts ./interop/m5_toy_kh $(whoami)@127.0.0.1 'uname -s; exit 6'
+```
+
+Expected: `sshd` logs the `aes128-ctr` / `hmac-sha2-256` pair and `Accepted publickey`, the
+output arrives, the client exits 6.
+
+Verified 2026-09-19 against OpenSSH_10.2p1 in both directions: `echo` + exit 3, 20000 lines
+byte-identical (`md5` matched) with stderr kept separate and exit 7, `uname -s` + exit 6 from
+the toy client. The default suite was re-checked in the same run, both ways (exit 4 / exit 5).
+
 ### 3d. Reading the debug output
 
 - `ssh -vvv`: look for `SSH2_MSG_KEXINIT`, `expecting SSH2_MSG_KEX_ECDH_REPLY`,

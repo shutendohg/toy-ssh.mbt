@@ -104,19 +104,21 @@ Our advertised lists:
 
 | list | client sends | server sends |
 |---|---|---|
-| kex_algorithms | `curve25519-sha256,curve25519-sha256@libssh.org,kex-strict-c-v00@openssh.com` | `curve25519-sha256,curve25519-sha256@libssh.org,kex-strict-s-v00@openssh.com` |
+| kex_algorithms | `mlkem768x25519-sha256,curve25519-sha256,curve25519-sha256@libssh.org,kex-strict-c-v00@openssh.com` | `mlkem768x25519-sha256,curve25519-sha256,curve25519-sha256@libssh.org,kex-strict-s-v00@openssh.com` |
 | server_host_key_algorithms | `ssh-ed25519` | `ssh-ed25519` |
-| encryption_* (both) | `chacha20-poly1305@openssh.com` | `chacha20-poly1305@openssh.com` |
-| mac_* (both) | `none`* | `none`* |
+| encryption_* (both) | `chacha20-poly1305@openssh.com,aes128-ctr` | `chacha20-poly1305@openssh.com,aes128-ctr` |
+| mac_* (both) | `hmac-sha2-256`* | `hmac-sha2-256`* |
 | compression_* (both) | `none` | `none` |
 | languages_* | *(empty)* | *(empty)* |
 
-\* Because the cipher is AEAD, the MAC list is effectively ignored by the peer for this
-cipher. Sending an empty MAC list works with OpenSSH for AEAD ciphers. To be safe and match
-OpenSSH's own KEXINIT, you MAY send `hmac-sha2-256` in the MAC lists even though it is never
-used with the AEAD cipher; document whichever you pick. **Recommendation:** send an empty MAC
-name-list — OpenSSH accepts it for AEAD ciphers and it makes the "MAC is implicit" intent
-explicit in the code.
+\* The MAC list belongs to `aes128-ctr` (M5, §9). When the AEAD cipher wins the negotiation
+no MAC algorithm is negotiated at all and the slot stays empty — the MAC is implicit there.
+Until M5 we sent an empty MAC list, which OpenSSH also accepts for an AEAD-only KEXINIT.
+
+**One suite per connection.** The two directions are negotiated independently in SSH, but we
+refuse a result where they differ (`negotiate: the two directions must use the same cipher
+and MAC`): a peer only reaches that by advertising deliberately disjoint preferences, and one
+method per connection keeps the key derivation and the record layer a single case.
 
 **The strict-kex pseudo-algorithm** (`kex-strict-c-v00@openssh.com` from the client,
 `kex-strict-s-v00@openssh.com` from the server) is added to our kex list. If **both** sides
@@ -264,7 +266,11 @@ For `chacha20-poly1305@openssh.com`:
 - The cipher needs **64 bytes** of key per direction (see §7). So `C` and `D` each need 64
   bytes → two HASH iterations each (32 + 32).
 - IVs (`A`,`B`) and MAC keys (`E`,`F`) are **not used** (the AEAD derives its nonce from the
-  sequence number and its Poly1305 key from the stream). Derive them or not — they're unused.
+  sequence number and its Poly1305 key from the stream). We derive 0 bytes for them rather
+  than deriving and discarding them.
+
+For `aes128-ctr` + `hmac-sha2-256` (§9): all six letters are used — 16-byte IVs (`A`,`B`),
+16-byte keys (`C`,`D`), 32-byte MAC keys (`E`,`F`).
 
 Client uses `C`/`E` keys to **send** and `D`/`F` to **receive**; server is the mirror.
 
@@ -378,3 +384,30 @@ server replies `SSH_MSG_SERVICE_ACCEPT` with the same service name. Then useraut
 ([04](04-auth-connection-spec.md)). The connection protocol later uses service
 `"ssh-connection"` but that service is implicitly available after successful auth — no second
 service request is needed.
+
+## 9. `aes128-ctr` + `hmac-sha2-256` packet format (M5)
+
+The classic RFC 4253 §6 / §6.4 construction, kept as a second suite so the non-AEAD path is
+exercised. It is **not** encrypt-then-MAC (that is `hmac-...-etm@openssh.com`, which we do
+not implement):
+
+```
+mac    = HMAC-SHA-256(integrity_key, uint32(seqnum) || plaintext_packet)
+wire   = AES-128-CTR(encryption_key, counter, plaintext_packet) || mac (32 bytes)
+```
+
+where `plaintext_packet` is the ordinary framing — `uint32 packet_length`, `byte
+padding_length`, payload, padding — and the **whole** packet including the length field is
+encrypted. Alignment follows RFC 4253 §6: `4 + packet_length` is a multiple of the 16-byte
+block size, with at least 4 bytes of padding.
+
+The counter (RFC 4344 §4) starts at the derived IV and **runs on across packets**: it is
+never reset per packet. A receiver decrypts the first block with the current counter to learn
+`packet_length`, waits for `4 + packet_length + 32` bytes, decrypts the rest and only then
+checks the MAC.
+
+That ordering is the known weakness of this construction: the length is acted on before
+anything is authenticated. We reject a decrypted length that is beyond the packet cap, below
+the minimum, or not block aligned, so a peer still cannot make us buffer or allocate without
+bound — but a flipped bit in the length field shows up as "wait for more data" rather than as
+a MAC error. Prefer the AEAD suite; this one exists to exercise the code path.
