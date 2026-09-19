@@ -288,3 +288,14 @@ More quirks found in M6:
       sign?
 - [ ] Server refuses `pty-req` and the interop `ssh` command uses `-T`?
 - [ ] Native target for anything touching sockets/processes?
+
+## Two coroutines must not write one handle
+
+`@stdio.stderr.write` from two tasks at once panics inside the async runtime's IO worker
+(`IoHandle::write_via_worker`), and a panic is not catchable — the process dies. This is the
+same one-reader / one-writer rule that applies to sockets and pipes, but it is easy to miss
+for logging, because logging looks like a side effect rather than IO.
+
+It first appeared when `direct-tcpip` started doing its outbound connect in its own task
+(M5): eight concurrent `ssh -L` connections meant eight tasks logging at once, and the server
+died. `net.log` now takes a one-permit semaphore around the write.

@@ -176,7 +176,14 @@ Pick any, each independent of the others:
   Acceptance: NIST SP 800-38A F.5.1 and RFC 4231 vectors, a byte-exact packet fixture built
   outside this code base (`openssl enc` + Python `hmac`), in-memory self-interop over the
   suite, and OpenSSH interop both ways (§3f of [07-verification-plan.md](07-verification-plan.md)).
-- **`direct-tcpip` port forwarding:** a second channel type.
+- **`direct-tcpip` port forwarding: done, server side (2026-09-19).** A second channel type,
+  and the reason the server now keeps a channel table instead of one hard-wired channel:
+  `ssh -L` opens one channel per local connection. Off unless `--allow-tcp-forwarding` is
+  given. Details and the deliberate limitations (no half-close, no client-side `-L`) are in
+  [04-auth-connection-spec.md](04-auth-connection-spec.md) "`direct-tcpip` port forwarding".
+  Acceptance: the sans-IO tests in `src/connection/forward_test.mbt` (refusal by default,
+  confirm-after-connect, connect failure, two forwards at once, a session alongside a
+  forward) plus the OpenSSH interop in §3g of [07-verification-plan.md](07-verification-plan.md).
 
 Each stretch item should come with its own acceptance test and, where an OpenSSH-comparable
 path exists, an interop check (e.g. force `ssh -o KexAlgorithms=diffie-hellman-group14-sha256`).

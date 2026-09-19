@@ -238,6 +238,10 @@ pub(all) enum CipherMethod {
 /// The negotiated cipher and MAC names, mapped to a method. The MAC name is
 /// ignored for an AEAD cipher (RFC 4253's MAC slot has no meaning there,
 /// which is why we advertise the AEAD without one).
+///
+/// A new non-AEAD suite has to be added to `needs_mac` in `kex.mbt` as
+/// well, or no MAC would be negotiated for it and this would answer
+/// `None` on a connection that should have worked.
 pub fn cipher_method(cipher : String, mac : String) -> CipherMethod? {
   match cipher {
     CIPHER_CHACHA20_POLY1305 => Some(ChaCha20Poly1305)
@@ -248,15 +252,6 @@ pub fn cipher_method(cipher : String, mac : String) -> CipherMethod? {
         None
       }
     _ => None
-  }
-}
-
-///|
-/// Whether this method needs a MAC algorithm negotiated alongside it.
-pub fn CipherMethod::needs_mac(self : CipherMethod) -> Bool {
-  match self {
-    ChaCha20Poly1305 => false
-    Aes128CtrHmacSha256 => true
   }
 }
 
