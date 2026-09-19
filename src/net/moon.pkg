@@ -17,3 +17,7 @@ import {
 } for "test"
 
 supported_targets = "+native"
+
+options(
+  "native-stub": [ "pty_stub.c" ],
+)

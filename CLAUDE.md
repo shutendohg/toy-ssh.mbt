@@ -40,9 +40,12 @@ implements it.
 
 ## Scope reminders (don't accidentally expand)
 
-- One suite only: `curve25519-sha256` / `ssh-ed25519` / `chacha20-poly1305@openssh.com` /
-  no compression. Modern strict-kex on.
-- `exec` + non-PTY `shell` on a single `session` channel. No PTY, no forwarding, no SFTP.
+- Two cipher suites: `chacha20-poly1305@openssh.com` (preferred) and `aes128-ctr` +
+  `hmac-sha2-256` (M5). Kex is `mlkem768x25519-sha256` (preferred, M6) or
+  `curve25519-sha256`; host key `ssh-ed25519`; no compression; strict-kex on.
+- `exec` + `shell` on a `session` channel, with a PTY when the peer asks (M5). No SFTP.
+  Server-side `direct-tcpip` forwarding exists but is off unless `--allow-tcp-forwarding`
+  is given; the client has no `-L`.
 - Unencrypted `openssh-key-v1` keys only.
 - **No rekey**: on a post-handshake `KEXINIT`, disconnect.
 - Everything else is `docs/06` M5 stretch, explicitly optional.

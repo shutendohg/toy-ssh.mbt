@@ -636,6 +636,8 @@ struct ServerChannel {
   mut confirmed : Bool
   /// Sessions only: an exec or shell has been accepted.
   mut started : Bool
+  /// Sessions only: a `pty-req` was accepted before anything started.
+  mut pty : Bool
   mut finished : Bool
 }
 
@@ -646,8 +648,29 @@ struct ServerChannel {
 pub(all) enum ServerEvent {
   /// Run this command (`sh -c command`) and stream its output back.
   ExecRequest(channel~ : UInt, command~ : String)
-  /// Start the login shell with no PTY.
-  ShellRequest(channel~ : UInt)
+  /// Start the login shell. `pty` is true when the peer asked for a
+  /// terminal first and we accepted it, so the caller runs the shell on
+  /// the pty rather than on pipes.
+  ShellRequest(channel~ : UInt, pty~ : Bool)
+  /// The peer wants a terminal on this channel, before it starts
+  /// anything. `modes` is the raw encoded modes string.
+  PtyRequest(
+    channel~ : UInt,
+    term~ : String,
+    cols~ : UInt,
+    rows~ : UInt,
+    width_px~ : UInt,
+    height_px~ : UInt,
+    modes~ : Bytes
+  )
+  /// The peer's terminal was resized.
+  WindowChange(
+    channel~ : UInt,
+    cols~ : UInt,
+    rows~ : UInt,
+    width_px~ : UInt,
+    height_px~ : UInt
+  )
   /// Connect to `host`:`port` and relay the channel to it, then call
   /// `forward_connected` or `forward_failed`. Nothing is sent to the peer
   /// until one of those happens.
@@ -925,21 +948,59 @@ pub fn ServerSession::on_payload(
     SSH_MSG_CHANNEL_REQUEST => {
       let req = decode_channel_request(payload)
       let c = self.channel(req.recipient_channel, "CHANNEL_REQUEST")
+      let fresh_session = c.purpose == Session && !c.started
+      // One terminal per session: `pty-req` starts nothing, so without
+      // this a peer could ask again and again, and each request costs the
+      // server a real pty.
+      let want_pty = fresh_session && !c.pty
       let accepted = match req.request {
         // docs/04: refuse a second exec or shell on the same channel, and
         // anything at all on a forwarded one — it carries bytes, not
         // commands.
-        Exec(command) if c.purpose == Session && !c.started => {
+        Exec(command) if fresh_session => {
           c.started = true
           events.push(ExecRequest(channel=req.recipient_channel, command~))
           true
         }
-        Shell if c.purpose == Session && !c.started => {
+        Shell if fresh_session => {
           c.started = true
-          events.push(ShellRequest(channel=req.recipient_channel))
+          events.push(ShellRequest(channel=req.recipient_channel, pty=c.pty))
           true
         }
-        // Everything else, `pty-req` included, is refused.
+        // A terminal is only meaningful on a session, and only before the
+        // command that would run on it (RFC 4254 section 6.2 puts
+        // `pty-req` first; honouring a late one would mean re-parenting a
+        // running process).
+        PtyReq(term~, cols~, rows~, width_px~, height_px~, modes~) if want_pty => {
+          c.pty = true
+          events.push(
+            PtyRequest(
+              channel=req.recipient_channel,
+              term~,
+              cols~,
+              rows~,
+              width_px~,
+              height_px~,
+              modes~,
+            ),
+          )
+          true
+        }
+        // A resize is only interesting once there is a terminal, and it
+        // never wants a reply.
+        WindowChange(cols~, rows~, width_px~, height_px~) if c.pty => {
+          events.push(
+            WindowChange(
+              channel=req.recipient_channel,
+              cols~,
+              rows~,
+              width_px~,
+              height_px~,
+            ),
+          )
+          true
+        }
+        // Everything else is refused.
         _ => false
       }
       if req.want_reply {
@@ -1078,6 +1139,7 @@ fn ServerSession::on_channel_open(
     // connect to succeed.
     confirmed: purpose == Session,
     started: false,
+    pty: false,
     finished: false,
   }
   match target {

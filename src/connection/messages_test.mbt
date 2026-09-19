@@ -170,10 +170,12 @@ test "channel request: exec, shell, exit-status and an unknown request" {
   inspect(code, content="3")
   // A request we do not implement decodes as Other so the peer can be
   // answered CHANNEL_FAILURE rather than treated as a protocol error.
-  let pty = b"\x62\x00\x00\x00\x01\x00\x00\x00\x07pty-req\x01rest"
-  let other = @connection.decode_channel_request(pty[:])
+  // (`pty-req` used to be the example here; M5 implements it, so this
+  // uses one we still do not support.)
+  let x11 = b"\x62\x00\x00\x00\x01\x00\x00\x00\x07x11-req\x01rest"
+  let other = @connection.decode_channel_request(x11[:])
   guard other.request is Other(name) else { fail("expected Other") }
-  inspect(name, content="pty-req")
+  inspect(name, content="x11-req")
   inspect(other.want_reply, content="true")
 }
 

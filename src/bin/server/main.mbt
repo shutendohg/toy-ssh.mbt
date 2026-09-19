@@ -131,6 +131,7 @@ async fn[X] serve(
     session: None,
     children: Map([]),
     forwards: Map([]),
+    ptys: Map([]),
     allow_forward,
   }
   c.run(group, (c, ev) => {
@@ -188,6 +189,12 @@ async fn[X] serve(
   for _, fwd in state.forwards {
     fwd.close()
   }
+  for channel, entry in state.ptys {
+    let (pty, _) = entry
+    if !state.children.contains(channel) {
+      pty.close()
+    }
+  }
 }
 
 ///|
@@ -198,6 +205,9 @@ struct ConnState {
   mut session : @connection.ServerSession?
   children : Map[UInt, @net.Child]
   forwards : Map[UInt, @net.Forward]
+  /// Terminals asked for with `pty-req` and not yet handed to a command,
+  /// plus the `TERM` that came with each.
+  ptys : Map[UInt, (@net.Pty, String)]
   allow_forward : Bool
 }
 
@@ -300,14 +310,50 @@ async fn[X] handle_connection(
           c,
           peer,
           s,
+          state,
           channel,
           Some(command),
         )
       }
-      ShellRequest(channel~) => {
-        @net.log("[\{peer}] shell as \{auth.user().unwrap_or("?")}")
-        state.children[channel] = start_child(group, c, peer, s, channel, None)
+      ShellRequest(channel~, pty~) => {
+        @net.log(
+          "[\{peer}] shell as \{auth.user().unwrap_or("?")}\{if pty { " on a terminal" } else { "" }}",
+        )
+        state.children[channel] = start_child(
+          group,
+          c,
+          peer,
+          s,
+          state,
+          channel,
+          None,
+        )
       }
+      PtyRequest(channel~, term~, cols~, rows~, width_px~, height_px~, ..) => {
+        // Allocated now, handed to the command when it starts. A failure
+        // here is the peer's to know about: the request was accepted, so
+        // the session would otherwise run without the terminal it asked
+        // for.
+        let pty = @net.open_pty() catch {
+          e => {
+            @net.log("[\{peer}] pty-req failed: \{Repr(e)}")
+            s.close_channel(channel~)
+            flush(c, s)
+            continue
+          }
+        }
+        pty.set_window_size(cols~, rows~, width_px~, height_px~)
+        @net.log(
+          "[\{peer}] pty \{pty.slave_path()} \{cols}x\{rows} TERM=\{term}",
+        )
+        state.ptys[channel] = (pty, term)
+      }
+      WindowChange(channel~, cols~, rows~, width_px~, height_px~) =>
+        match state.ptys.get(channel) {
+          Some((pty, _)) =>
+            pty.set_window_size(cols~, rows~, width_px~, height_px~)
+          None => ()
+        }
       ForwardRequest(channel~, host~, port~) =>
         // In its own task: the connect can take as long as the network
         // does, and `Conn::run` awaits this handler, so connecting here
@@ -336,6 +382,18 @@ async fn[X] handle_connection(
           Some(fwd) => {
             fwd.close()
             state.forwards.remove(channel)
+          }
+          None => ()
+        }
+        // A pty that never got a command (the peer asked for one and then
+        // closed) is ours to close; one handed to a command is closed by
+        // that command's pump.
+        match state.ptys.get(channel) {
+          Some((pty, _)) => {
+            if !state.children.contains(channel) {
+              pty.close()
+            }
+            state.ptys.remove(channel)
           }
           None => ()
         }
@@ -414,10 +472,49 @@ async fn[X] start_child(
   c : @net.Conn,
   peer : @socket.Addr,
   s : @connection.ServerSession,
+  state : ConnState,
   channel : UInt,
   command : String?,
 ) -> @net.Child {
-  let child = @net.spawn_session(
+  let child = match state.ptys.get(channel) {
+    // A terminal merges the two output streams, so there is one pump and
+    // no EXTENDED_DATA on a pty session.
+    Some((pty, term)) =>
+      @net.spawn_session_pty(
+        group,
+        command,
+        pty,
+        term~,
+        () => s.queued_bytes(channel~),
+        chunk => {
+          s.send_data(channel~, chunk[:])
+          flush(c, s)
+        },
+      )
+    None => spawn_piped(group, c, s, command, channel)
+  }
+  group.spawn_bg(() => {
+    let status = child.wait()
+    // A child killed by a signal reports a negative value, which is not a
+    // valid exit status; report it the way a shell does.
+    let code = if status < 0 { 128 - status } else { status }
+    @net.log("[\{peer}] pid \{child.pid()} exited with \{status}")
+    s.finish(channel~, exit_status=code.reinterpret_as_uint())
+    flush(c, s)
+  })
+  child
+}
+
+///|
+/// The plain, pipe-backed session: stdout and stderr stay apart.
+async fn[X] spawn_piped(
+  group : @async.TaskGroup[X],
+  c : @net.Conn,
+  s : @connection.ServerSession,
+  command : String?,
+  channel : UInt,
+) -> @net.Child {
+  @net.spawn_session(
     group,
     command,
     chunk => {
@@ -429,16 +526,6 @@ async fn[X] start_child(
       flush(c, s)
     },
   )
-  group.spawn_bg(() => {
-    let status = child.wait()
-    // A child killed by a signal reports a negative value, which is not a
-    // valid exit status; report it the way a shell does.
-    let code = if status < 0 { 128 - status } else { status }
-    @net.log("[\{peer}] pid \{child.pid()} exited with \{status}")
-    s.finish(channel~, exit_status=code.reinterpret_as_uint())
-    flush(c, s)
-  })
-  child
 }
 
 ///|

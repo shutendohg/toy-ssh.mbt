@@ -162,9 +162,18 @@ real process in `net/` → OpenSSH interop demos.
 
 ## M5 — Stretch goals (optional; not required for "done")
 
-Pick any, each independent of the others:
-- **PTY:** honor `pty-req` (terminal modes, window size), allocate a pseudo-terminal for
-  `shell`. Enables `ssh` interactive without `-T`.
+**Status: three of four done (2026-09-19); `diffie-hellman-group14-sha256` + `rsa-sha2-256`
+was dropped deliberately.** Each item was independent of the others:
+- **PTY: done (2026-09-19).** `pty-req` and `window-change` on a session channel, with a
+  real pseudo-terminal for the command. `ssh` without `-T` gets a prompt, line editing and a
+  `TERM` that matches its own. The terminal modes string is accepted and ignored, and the
+  child gets no controlling terminal (so: no job control) — both are written down in
+  [04-auth-connection-spec.md](04-auth-connection-spec.md). This is the only C FFI in the
+  project: `grantpt`/`unlockpt`/`ptsname` and the window-size ioctl, with the master opened
+  through the async library so the runtime owns the handle.
+  Acceptance: the codec and state-machine tests in `src/connection/pty_test.mbt`, the
+  end-to-end pty test in `src/net/net_test.mbt`, and the interop in §3h of
+  [07-verification-plan.md](07-verification-plan.md).
 - **`diffie-hellman-group14-sha256` + `rsa-sha2-256`:** a second kex + host-key suite using
   `mpint` modexp (BigInt). Exercises the negotiation code with >1 real option.
 - **`aes128-ctr` + `hmac-sha2-256`: done (2026-09-19).** The classic RFC 4253 §6.4 suite —

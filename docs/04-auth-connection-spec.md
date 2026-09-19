@@ -342,3 +342,47 @@ The originator is informational; we do not act on it. Rules we follow:
 
 The client side (`-L` on the toy client) is **not** implemented; the toy client still opens
 exactly one `session` channel.
+
+### `pty-req` and `window-change` (M5)
+
+`ssh` without `-T` asks for a terminal before it asks for a shell, and a session that runs on
+one behaves like a login: a prompt, line editing, and programs that check `isatty`.
+
+```
+string  TERM
+uint32  width (characters)     uint32  height (rows)
+uint32  width (pixels)         uint32  height (pixels)
+string  encoded terminal modes
+```
+
+`window-change` carries the same four numbers and never asks for a reply.
+
+What we do:
+
+- **`pty-req` is accepted only on a session channel, and only before `exec` or `shell`.**
+  RFC 4254 §6.2 puts it first, and honouring a late one would mean re-parenting a running
+  process onto a terminal. A late one gets CHANNEL_FAILURE.
+- The terminal is allocated when the request arrives and handed to the command when it
+  starts; `TERM` is passed through to the child's environment, and the window size is applied
+  with `TIOCSWINSZ` then re-applied on every `window-change`.
+- **A pty merges stdout and stderr**, so a pty session sends no `EXTENDED_DATA`.
+- **The terminal modes string is accepted and ignored.** We pass the size to the kernel and
+  leave `ECHO`, `ICANON` and the rest at their defaults, which is what a normal terminal
+  gives. A client asking for raw mode does not get it — toy limitation.
+- **The child is not a session leader with this pty as its controlling terminal.** That needs
+  `setsid` + `TIOCSCTTY` between fork and exec, which the process API does not expose, so a
+  shell reports "no job control". Everything else (prompt, editing, `tty`, signals typed as
+  characters reaching the foreground process) works.
+- **The server never opens the terminal without `O_NOCTTY`.** Its own slave handle goes
+  through the C stub with that flag, and the child attaches to the terminal itself (a `sh`
+  wrapper redirects and `exec`s), because the library's redirect helpers open the path in the
+  *calling* process. Otherwise the pty a peer asked for could become the controlling terminal
+  of a daemonized server, and a typed `^C` would reach the server's own process group.
+- **One `pty-req` per session.** It starts nothing, so nothing else would stop a peer from
+  repeating it, and each one costs a real pseudo-terminal; a second is refused.
+- **A peer's CHANNEL_EOF cannot close the command's input**: closing the master would take
+  the terminal away from a command still using it, and a pty has no half-close. The command
+  learns about it when the session ends — the same limitation forwarding has.
+
+The ordering around the pty's own descriptors is the part that is easy to get wrong, and it
+is recorded in [08-moonbit-guide.md](08-moonbit-guide.md).

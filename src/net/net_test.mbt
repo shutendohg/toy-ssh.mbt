@@ -139,3 +139,57 @@ async test "append_line: keeps entries on separate lines" {
   @net.append_line(path, "only")
   inspect(@net.read_text_file(path), content="only\n")
 }
+
+///|
+/// The one piece of C FFI in the project (docs/06 M5): allocating a
+/// pseudo-terminal and running a command on it. Only runs outside the
+/// sandbox — `/dev/ptmx` is out of reach inside it, like sockets.
+async test "pty: a command's output comes back through the master side" {
+  let pty = @net.open_pty()
+  defer pty.close()
+  assert_true(pty.slave_path().has_prefix("/dev/"))
+  pty.set_window_size(cols=80, rows=24, width_px=0, height_px=0)
+  let seen = StringBuilder()
+  @async.with_task_group(group => {
+    // The master has to be read while the command runs: once the last
+    // slave descriptor closes, a read returns end of file and anything
+    // still buffered is gone.
+    let reader = group.spawn(() => {
+      let buf = FixedArray::make(4096, b'\x00')
+      while true {
+        let n = pty.master().read(buf) catch { _ => break }
+        if n == 0 {
+          break
+        }
+        seen.write_string(
+          @utf8.decode(Bytes::makei(n, i => buf[i])[:]) catch {
+            _ => ""
+          },
+        )
+      }
+    })
+    // The child attaches to the terminal itself: opening it here would
+    // give this process a controlling terminal it never asked for (see
+    // `spawn_session_pty`).
+    let proc = @process.spawn(
+      group,
+      "/bin/sh",
+      ["-c", "exec 0<\"$T\" 1>\"$T\" 2>&1; tty; echo done"],
+      extra_env={ "T": pty.slave_path() },
+    )
+    // Reap the child first, then drop our slave handle: that is what
+    // gives the reader its end of file. Doing it the other way round
+    // races the child's own open of the slave.
+    ignore(proc.wait())
+    pty.release_slave()
+    reader.wait() catch {
+      _ => ()
+    }
+  })
+  let text = seen.to_string()
+  // Not a byte-exact comparison: a terminal translates newlines. What
+  // matters is that `tty` saw a terminal rather than a pipe, which is the
+  // whole point of a pty.
+  assert_true(text.contains("/dev/"))
+  assert_true(text.contains("done"))
+}
