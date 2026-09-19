@@ -342,12 +342,6 @@ async fn[X] handle_connection(
             continue
           }
         }
-        // The session layer allows one per channel; if that ever changes,
-        // the old one still has to be closed rather than forgotten.
-        match state.ptys.get(channel) {
-          Some((old, _)) => old.close()
-          None => ()
-        }
         pty.set_window_size(cols~, rows~, width_px~, height_px~)
         @net.log(
           "[\{peer}] pty \{pty.slave_path()} \{cols}x\{rows} TERM=\{term}",

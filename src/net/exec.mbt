@@ -222,7 +222,10 @@ async fn pump_terminal(
     // The escape hatch matters: when a peer vanishes mid-transfer its
     // queue never drains, and without `stopped` this loop would spin for
     // the life of the process, holding the connection's task group — and
-    // its socket — open.
+    // its socket — open. What sets it is `Child::cancel`, which the
+    // connection's teardown always reaches once the read side is done;
+    // that is also what frees a pump parked here while `Child::wait`
+    // waits to join it.
     while !stopped.val && queued_bytes() > CHILD_QUEUE_LIMIT {
       @async.sleep(10)
     }
