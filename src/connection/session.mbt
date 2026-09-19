@@ -616,107 +616,299 @@ fn ClientSession::close(
 // ---------------------------------------------------------------------------
 
 ///|
+/// What an open channel is for. A `session` runs a command; a forward
+/// relays bytes to a TCP address the peer named.
+enum ChannelPurpose {
+  Session
+  Forward
+} derive(Eq)
+
+///|
+/// One open channel on the server: its purpose, its flow-control state and
+/// its own ordered send queue. Queues are per channel because credit is:
+/// one channel stalled on its window must not hold up another.
+struct ServerChannel {
+  purpose : ChannelPurpose
+  ch : Channel
+  queue : Array[Pending]
+  /// Forwards only: false until the TCP connect succeeded and we sent the
+  /// confirmation. Nothing may be addressed to the peer before that.
+  mut confirmed : Bool
+  /// Sessions only: an exec or shell has been accepted.
+  mut started : Bool
+  mut finished : Bool
+}
+
+///|
 /// What the server's session reports to its caller, which owns the child
-/// process.
+/// process or the forwarded socket. Every event names the channel it is
+/// about: several may be open at once.
 pub(all) enum ServerEvent {
   /// Run this command (`sh -c command`) and stream its output back.
-  ExecRequest(String)
+  ExecRequest(channel~ : UInt, command~ : String)
   /// Start the login shell with no PTY.
-  ShellRequest
-  /// Standard input for the running command.
-  Stdin(Bytes)
-  /// The peer will send no more standard input; close the child's stdin.
-  StdinEof
+  ShellRequest(channel~ : UInt)
+  /// Connect to `host`:`port` and relay the channel to it, then call
+  /// `forward_connected` or `forward_failed`. Nothing is sent to the peer
+  /// until one of those happens.
+  ForwardRequest(channel~ : UInt, host~ : String, port~ : UInt)
+  /// Data from the peer: standard input for a session, bytes for the
+  /// forwarded socket.
+  Stdin(channel~ : UInt, data~ : Bytes)
+  /// The peer will send no more; close that direction.
+  StdinEof(channel~ : UInt)
   /// Both sides have sent CLOSE; the channel is gone.
-  Closed
+  Closed(channel~ : UInt)
 } derive(Debug, Eq)
 
 ///|
-/// The server half: accepts one `session`, reports the request, and
-/// streams the command's output and exit status back.
+/// The server half: accepts channels, reports what each one is for, and
+/// streams data, exit statuses and teardown back.
 pub struct ServerSession {
-  ch : Channel
+  channels : Map[UInt, ServerChannel]
   outgoing : Array[Bytes]
-  queue : Array[Pending]
-  mut opened : Bool
-  mut started : Bool
-  mut finished : Bool
+  /// The window and packet size we advertise on every channel we accept.
+  window_size : UInt
+  max_packet_size : UInt
+  /// Whether `direct-tcpip` is allowed at all. Off by default: a server
+  /// that forwards for anyone who authenticates is an open relay onto
+  /// whatever it can reach from where it runs.
+  allow_forward : Bool
+  /// Our channel ids, handed out in order and never reused.
+  mut next_id : UInt
+  /// One `session` at a time, as before M5; forwards are unlimited.
+  mut session_open : Bool
+  /// Whether any channel has ever been opened, which is what makes
+  /// "no channels left" mean "the peer is done" rather than "not started".
+  mut opened_any : Bool
 }
 
 ///|
 pub fn ServerSession::new(
   window_size~ : UInt,
   max_packet_size~ : UInt,
+  allow_forward? : Bool = false,
 ) -> ServerSession {
   {
-    ch: Channel::new(window_size, max_packet_size),
+    channels: {},
     outgoing: [],
-    queue: [],
-    opened: false,
-    started: false,
-    finished: false,
+    window_size,
+    max_packet_size,
+    allow_forward,
+    next_id: 0,
+    session_open: false,
+    opened_any: false,
   }
 }
 
 ///|
+/// The channel `id`, or a `ConnectionError` naming it: a peer addressing a
+/// channel we do not have is talking about something that does not exist.
+fn ServerSession::channel(
+  self : ServerSession,
+  id : UInt,
+  ctx : String,
+) -> ServerChannel raise ConnectionError {
+  match self.channels.get(id) {
+    Some(c) => c
+    None => raise ConnectionError("\{ctx}: no channel \{id}")
+  }
+}
+
+///|
+/// Payloads queued for the peer; the caller hands each to the transport.
+/// Every channel gets its turn, so one blocked on its window does not
+/// starve the others.
 pub fn ServerSession::take_outgoing(self : ServerSession) -> Array[Bytes] {
-  self.ch.drain(self.queue, self.outgoing)
+  for _, c in self.channels {
+    if c.confirmed {
+      c.ch.drain(c.queue, self.outgoing)
+    }
+  }
   let out = self.outgoing.copy()
   self.outgoing.clear()
   out
 }
 
 ///|
+/// True once a channel has been opened and every channel has since gone.
+/// A connection that has not opened anything yet is not "closed": a caller
+/// that hangs up on this would tear the connection down right after
+/// authentication.
 pub fn ServerSession::is_closed(self : ServerSession) -> Bool {
-  self.ch.is_closed()
+  self.opened_any && self.channels.is_empty()
 }
 
 ///|
-/// Queue the command's standard output.
-pub fn ServerSession::send_stdout(
+/// Bytes queued and not yet sent on one channel, so whoever feeds it can
+/// stop reading instead of buffering without bound.
+pub fn ServerSession::queued_bytes(
   self : ServerSession,
+  channel~ : UInt,
+) -> Int {
+  match self.channels.get(channel) {
+    None => 0
+    Some(c) => {
+      let mut total = 0
+      for item in c.queue {
+        match item {
+          Data(data~, ..) => total = total + data.length()
+          _ => ()
+        }
+      }
+      total
+    }
+  }
+}
+
+///|
+/// Queue data for the peer: a command's standard output, or bytes read
+/// from the forwarded socket.
+pub fn ServerSession::send_data(
+  self : ServerSession,
+  channel~ : UInt,
   data : BytesView,
 ) -> Unit {
   if data.length() == 0 {
     return
   }
-  self.queue.push(Data(data=data.to_owned(), extended=None))
+  match self.channels.get(channel) {
+    // The channel can be gone already: the socket pump and the peer's
+    // CLOSE race, and losing that race is not an error.
+    None => ()
+    Some(c) => c.queue.push(Data(data=data.to_owned(), extended=None))
+  }
 }
 
 ///|
-/// Queue the command's standard error.
+/// Queue a command's standard error (EXTENDED_DATA, code 1).
 pub fn ServerSession::send_stderr(
   self : ServerSession,
+  channel~ : UInt,
   data : BytesView,
 ) -> Unit {
   if data.length() == 0 {
     return
   }
-  self.queue.push(
-    Data(data=data.to_owned(), extended=Some(SSH_EXTENDED_DATA_STDERR)),
-  )
+  match self.channels.get(channel) {
+    None => ()
+    Some(c) =>
+      c.queue.push(
+        Data(data=data.to_owned(), extended=Some(SSH_EXTENDED_DATA_STDERR)),
+      )
+  }
+}
+
+///|
+/// Tell the peer this channel will carry no more data from us. Queued
+/// behind whatever is still waiting for window credit.
+pub fn ServerSession::send_eof(self : ServerSession, channel~ : UInt) -> Unit {
+  match self.channels.get(channel) {
+    None => ()
+    Some(c) =>
+      if !c.ch.eof_sent {
+        c.ch.eof_sent = true
+        c.queue.push(Eof)
+      }
+  }
+}
+
+///|
+/// Close the channel from our side.
+pub fn ServerSession::close_channel(
+  self : ServerSession,
+  channel~ : UInt,
+) -> Unit {
+  match self.channels.get(channel) {
+    None => ()
+    Some(c) =>
+      if !c.ch.close_sent {
+        c.ch.close_sent = true
+        c.queue.push(Close)
+      }
+  }
 }
 
 ///|
 /// The command exited: report its status, then EOF and CLOSE (docs/04
-/// "Closing & exit status"). Queued output is still flushed first, because
-/// `take_outgoing` drains the data queue before these.
-pub fn ServerSession::finish(self : ServerSession, exit_status~ : UInt) -> Unit {
-  if self.finished {
-    return
+/// "Closing & exit status"). Queued output is flushed first, because
+/// `drain` works through the queue in order.
+pub fn ServerSession::finish(
+  self : ServerSession,
+  channel~ : UInt,
+  exit_status~ : UInt,
+) -> Unit {
+  match self.channels.get(channel) {
+    None => ()
+    Some(c) => {
+      if c.finished {
+        return
+      }
+      c.finished = true
+      c.queue.push(ExitStatus(exit_status))
+      if !c.ch.eof_sent {
+        c.ch.eof_sent = true
+        c.queue.push(Eof)
+      }
+      if !c.ch.close_sent {
+        c.ch.close_sent = true
+        c.queue.push(Close)
+      }
+    }
   }
-  self.finished = true
-  // All three are queued behind whatever output is still waiting for
-  // window credit, so the peer never sees them before the last byte.
-  self.queue.push(ExitStatus(exit_status))
-  if !self.ch.eof_sent {
-    self.ch.eof_sent = true
-    self.queue.push(Eof)
+}
+
+///|
+/// The TCP connect for a forwarded channel succeeded: confirm it, which is
+/// the first thing the peer hears about this channel.
+pub fn ServerSession::forward_connected(
+  self : ServerSession,
+  channel~ : UInt,
+) -> Unit {
+  guard self.channels.get(channel) is Some(c) else { return }
+  guard c.purpose == Forward && !c.confirmed else {
+    abort("ServerSession: channel \{channel} is not a pending forward")
   }
-  if !self.ch.close_sent {
-    self.ch.close_sent = true
-    self.queue.push(Close)
+  c.confirmed = true
+  self.outgoing.push(
+    encode_channel_open_confirmation(
+      recipient_channel=c.ch.remote_channel,
+      sender_channel=channel,
+      initial_window_size=c.ch.recv_window_size,
+      maximum_packet_size=c.ch.recv_max_packet,
+    ),
+  )
+}
+
+///|
+/// The TCP connect failed: refuse the channel and forget it. The peer
+/// never saw it open, so this is an open failure rather than a close.
+pub fn ServerSession::forward_failed(
+  self : ServerSession,
+  channel~ : UInt,
+  description~ : String,
+) -> Unit {
+  guard self.channels.get(channel) is Some(c) else { return }
+  guard c.purpose == Forward && !c.confirmed else {
+    abort("ServerSession: channel \{channel} is not a pending forward")
   }
+  self.outgoing.push(
+    encode_channel_open_failure(
+      recipient_channel=c.ch.remote_channel,
+      reason=SSH_OPEN_CONNECT_FAILED,
+      description~,
+    ),
+  )
+  self.channels.remove(channel)
+}
+
+///|
+/// Take the next channel id. Ids are never reused, so a stale message
+/// naming a closed channel is rejected instead of hitting a new one.
+fn ServerSession::allocate(self : ServerSession) -> UInt {
+  let id = self.next_id
+  self.next_id = self.next_id + 1
+  id
 }
 
 ///|
@@ -729,58 +921,22 @@ pub fn ServerSession::on_payload(
     raise ConnectionError("empty connection payload")
   }
   match payload[0] {
-    SSH_MSG_CHANNEL_OPEN => {
-      let open = decode_channel_open(payload)
-      if self.opened {
-        // One channel per connection is all we support.
-        self.outgoing.push(
-          encode_channel_open_failure(
-            recipient_channel=open.sender_channel,
-            reason=SSH_OPEN_RESOURCE_SHORTAGE,
-            description="only one session channel is supported",
-          ),
-        )
-        return events
-      }
-      if open.channel_type != CHANNEL_SESSION {
-        self.outgoing.push(
-          encode_channel_open_failure(
-            recipient_channel=open.sender_channel,
-            reason=SSH_OPEN_UNKNOWN_CHANNEL_TYPE,
-            description="only \{CHANNEL_SESSION} is supported",
-          ),
-        )
-        return events
-      }
-      self.opened = true
-      self.ch.accept_peer_limits(
-        open.sender_channel,
-        open.initial_window_size,
-        open.maximum_packet_size,
-        "CHANNEL_OPEN",
-      )
-      self.outgoing.push(
-        encode_channel_open_confirmation(
-          recipient_channel=open.sender_channel,
-          sender_channel=LOCAL_CHANNEL,
-          initial_window_size=self.ch.recv_window_size,
-          maximum_packet_size=self.ch.recv_max_packet,
-        ),
-      )
-    }
+    SSH_MSG_CHANNEL_OPEN => self.on_channel_open(payload, events)
     SSH_MSG_CHANNEL_REQUEST => {
       let req = decode_channel_request(payload)
-      check_open_channel(self.opened, req.recipient_channel, "CHANNEL_REQUEST")
+      let c = self.channel(req.recipient_channel, "CHANNEL_REQUEST")
       let accepted = match req.request {
-        // docs/04: refuse a second exec or shell on the same channel.
-        Exec(command) if !self.started => {
-          self.started = true
-          events.push(ExecRequest(command))
+        // docs/04: refuse a second exec or shell on the same channel, and
+        // anything at all on a forwarded one — it carries bytes, not
+        // commands.
+        Exec(command) if c.purpose == Session && !c.started => {
+          c.started = true
+          events.push(ExecRequest(channel=req.recipient_channel, command~))
           true
         }
-        Shell if !self.started => {
-          self.started = true
-          events.push(ShellRequest)
+        Shell if c.purpose == Session && !c.started => {
+          c.started = true
+          events.push(ShellRequest(channel=req.recipient_channel))
           true
         }
         // Everything else, `pty-req` included, is refused.
@@ -789,50 +945,46 @@ pub fn ServerSession::on_payload(
       if req.want_reply {
         self.outgoing.push(
           if accepted {
-            encode_channel_success(recipient_channel=self.ch.remote_channel)
+            encode_channel_success(recipient_channel=c.ch.remote_channel)
           } else {
-            encode_channel_failure(recipient_channel=self.ch.remote_channel)
+            encode_channel_failure(recipient_channel=c.ch.remote_channel)
           },
         )
       }
     }
     SSH_MSG_CHANNEL_DATA => {
       let (channel, data) = decode_channel_data(payload)
-      check_open_channel(self.opened, channel, "CHANNEL_DATA")
-      self.ch.check_not_after_eof("CHANNEL_DATA")
-      if self.ch.consume(data.length()) is Some(adjust) {
+      let c = self.channel(channel, "CHANNEL_DATA")
+      c.ch.check_not_after_eof("CHANNEL_DATA")
+      if c.ch.consume(data.length()) is Some(adjust) {
         self.outgoing.push(adjust)
       }
-      events.push(Stdin(data))
+      events.push(Stdin(channel~, data~))
     }
     SSH_MSG_CHANNEL_WINDOW_ADJUST => {
       let (channel, add) = decode_channel_window_adjust(payload)
-      check_open_channel(self.opened, channel, "CHANNEL_WINDOW_ADJUST")
-      self.ch.grant(add)
+      self.channel(channel, "CHANNEL_WINDOW_ADJUST").ch.grant(add)
     }
     SSH_MSG_CHANNEL_EOF => {
-      check_open_channel(
-        self.opened,
-        decode_channel_eof(payload),
-        "CHANNEL_EOF",
-      )
-      self.ch.eof_received = true
-      events.push(StdinEof)
+      let channel = decode_channel_eof(payload)
+      self.channel(channel, "CHANNEL_EOF").ch.eof_received = true
+      events.push(StdinEof(channel~))
     }
     SSH_MSG_CHANNEL_CLOSE => {
-      check_open_channel(
-        self.opened,
-        decode_channel_close(payload),
-        "CHANNEL_CLOSE",
-      )
-      self.ch.close_received = true
-      if !self.ch.close_sent {
-        self.ch.close_sent = true
+      let channel = decode_channel_close(payload)
+      let c = self.channel(channel, "CHANNEL_CLOSE")
+      c.ch.close_received = true
+      if !c.ch.close_sent {
+        c.ch.close_sent = true
         self.outgoing.push(
-          encode_channel_close(recipient_channel=self.ch.remote_channel),
+          encode_channel_close(recipient_channel=c.ch.remote_channel),
         )
       }
-      events.push(Closed)
+      if c.purpose == Session {
+        self.session_open = false
+      }
+      self.channels.remove(channel)
+      events.push(Closed(channel~))
     }
     SSH_MSG_GLOBAL_REQUEST => {
       let (_, want_reply) = decode_global_request(payload)
@@ -844,4 +996,102 @@ pub fn ServerSession::on_payload(
       raise ConnectionError("connection: unexpected message \{other.to_int()}")
   }
   events
+}
+
+///|
+/// A peer's CHANNEL_OPEN: accept a `session` (one at a time) straight
+/// away, hold a `direct-tcpip` until the caller has connected, refuse
+/// anything else.
+fn ServerSession::on_channel_open(
+  self : ServerSession,
+  payload : BytesView,
+  events : Array[ServerEvent],
+) -> Unit raise ConnectionError {
+  let open = decode_channel_open(payload)
+  fn refuse(reason : UInt, description : String) -> Unit {
+    self.outgoing.push(
+      encode_channel_open_failure(
+        recipient_channel=open.sender_channel,
+        reason~,
+        description~,
+      ),
+    )
+  }
+
+  let purpose = match open.channel_type {
+    CHANNEL_SESSION => {
+      // `session` defines no type-specific data, so anything after the
+      // common fields is something we do not understand.
+      if open.extra.length() > 0 {
+        raise ConnectionError(
+          "CHANNEL_OPEN: \{open.extra.length()} trailing byte(s) on a session open",
+        )
+      }
+      if self.session_open {
+        // One session channel per connection is all we support.
+        refuse(
+          SSH_OPEN_RESOURCE_SHORTAGE,
+          "only one session channel is supported",
+        )
+        return
+      }
+      Session
+    }
+    CHANNEL_DIRECT_TCPIP => {
+      if !self.allow_forward {
+        refuse(
+          SSH_OPEN_ADMINISTRATIVELY_PROHIBITED,
+          "tcp forwarding is not enabled on this server",
+        )
+        return
+      }
+      Forward
+    }
+    other => {
+      refuse(
+        SSH_OPEN_UNKNOWN_CHANNEL_TYPE,
+        "channel type \{other} is not supported",
+      )
+      return
+    }
+  }
+  // Read the target before committing to anything: an unreadable open is
+  // a protocol violation, not a channel to refuse politely.
+  let target = match purpose {
+    Forward => Some(decode_direct_tcpip(open.extra[:]))
+    Session => None
+  }
+  let id = self.allocate()
+  self.opened_any = true
+  let ch = Channel::new(self.window_size, self.max_packet_size)
+  ch.accept_peer_limits(
+    open.sender_channel,
+    open.initial_window_size,
+    open.maximum_packet_size,
+    "CHANNEL_OPEN",
+  )
+  self.channels[id] = {
+    purpose,
+    ch,
+    queue: [],
+    // A session is confirmed here and now; a forward waits for its TCP
+    // connect to succeed.
+    confirmed: purpose == Session,
+    started: false,
+    finished: false,
+  }
+  match target {
+    Some(t) => events.push(ForwardRequest(channel=id, host=t.host, port=t.port))
+    None => {
+      self.session_open = true
+      self.outgoing.push(
+        encode_channel_open_confirmation(
+          recipient_channel=open.sender_channel,
+          sender_channel=id,
+          initial_window_size=self.window_size,
+          maximum_packet_size=self.max_packet_size,
+        ),
+      )
+    }
+  }
 }

@@ -61,8 +61,14 @@ pub const SSH_OPEN_UNKNOWN_CHANNEL_TYPE : UInt = 3
 pub const SSH_OPEN_RESOURCE_SHORTAGE : UInt = 4
 
 ///|
-/// The only channel type we support.
+/// The channel type a shell or a command runs on.
 pub const CHANNEL_SESSION : String = "session"
+
+///|
+/// Local port forwarding (RFC 4254 section 7.2): the peer asks us to
+/// connect somewhere and relay bytes over the channel. This is what
+/// `ssh -L` opens, one channel per accepted local connection.
+pub const CHANNEL_DIRECT_TCPIP : String = "direct-tcpip"
 
 // ---------------------------------------------------------------------------
 // CHANNEL_OPEN and its replies
@@ -74,6 +80,10 @@ pub(all) struct ChannelOpen {
   sender_channel : UInt
   initial_window_size : UInt
   maximum_packet_size : UInt
+  /// Whatever the channel type appends to the common fields: empty for
+  /// `session`, the target and originator for `direct-tcpip`. Kept raw
+  /// because only the channel type knows how to read it.
+  extra : Bytes
 } derive(Debug, Eq)
 
 ///|
@@ -82,13 +92,15 @@ pub fn encode_channel_open(
   sender_channel~ : UInt,
   initial_window_size~ : UInt,
   maximum_packet_size~ : UInt,
+  extra? : Bytes = b"",
 ) -> Bytes {
-  let w = @wire.Writer::new(size_hint=32)
+  let w = @wire.Writer::new(size_hint=32 + extra.length())
   w.write_byte(SSH_MSG_CHANNEL_OPEN)
   w.write_str(channel_type)
   w.write_uint32(sender_channel)
   w.write_uint32(initial_window_size)
   w.write_uint32(maximum_packet_size)
+  w.write_raw(extra[:])
   w.to_bytes()
 }
 
@@ -103,11 +115,59 @@ pub fn decode_channel_open(
     sender_channel: r.read_uint32(),
     initial_window_size: r.read_uint32(),
     maximum_packet_size: r.read_uint32(),
+    // The rest belongs to the channel type; `session` leaves none.
+    extra: r.read_bytes(r.remaining()).to_owned(),
+  } catch {
+    e => raise wire_error(ctx, e)
+  }
+  open
+}
+
+///|
+/// The `direct-tcpip` target and the originator the peer reports for it.
+/// The originator is informational; we do not act on it.
+pub(all) struct DirectTcpip {
+  host : String
+  port : UInt
+  originator_host : String
+  originator_port : UInt
+} derive(Debug, Eq)
+
+///|
+/// The type-specific half of a `direct-tcpip` CHANNEL_OPEN.
+pub fn encode_direct_tcpip_extra(
+  host~ : String,
+  port~ : UInt,
+  originator_host~ : String,
+  originator_port~ : UInt,
+) -> Bytes {
+  let w = @wire.Writer::new(size_hint=32)
+  w.write_str(host)
+  w.write_uint32(port)
+  w.write_str(originator_host)
+  w.write_uint32(originator_port)
+  w.to_bytes()
+}
+
+///|
+/// Read that half back. The whole of `extra` must be consumed: trailing
+/// bytes mean the peer sent something we do not understand, and a channel
+/// we cannot read is one we should not open.
+pub fn decode_direct_tcpip(
+  extra : BytesView,
+) -> DirectTcpip raise ConnectionError {
+  let ctx = "direct-tcpip"
+  let r = @wire.Reader::new(extra)
+  let target = {
+    host: r.read_str(),
+    port: r.read_uint32(),
+    originator_host: r.read_str(),
+    originator_port: r.read_uint32(),
   } catch {
     e => raise wire_error(ctx, e)
   }
   expect_end(r, ctx)
-  open
+  target
 }
 
 ///|

@@ -226,3 +226,66 @@ test "decoders reject the wrong message number and trailing bytes" {
     ignore(@connection.decode_channel_window_adjust(b"\x5d\x00\x00\x00"[:]))
   })
 }
+
+///|
+/// `direct-tcpip` (RFC 4254 section 7.2): the CHANNEL_OPEN carries four
+/// type-specific fields after the common ones. Fixture built with Python's
+/// `struct`, not by this code.
+test "direct-tcpip: byte-exact channel open and round trip" {
+  let extra = @connection.encode_direct_tcpip_extra(
+    host="example.com",
+    port=80,
+    originator_host="127.0.0.1",
+    originator_port=54321,
+  )
+  let payload = @connection.encode_channel_open(
+    channel_type=@connection.CHANNEL_DIRECT_TCPIP,
+    sender_channel=0,
+    initial_window_size=2097152,
+    maximum_packet_size=32768,
+    extra~,
+  )
+  inspect(
+    @hex.encode(payload[:]),
+    content="5a0000000c6469726563742d746370697000000000002000000000800000" +
+      "00000b6578616d706c652e636f6d00000050000000093132372e302e302e310000d431",
+  )
+  let open = @connection.decode_channel_open(payload[:])
+  inspect(open.channel_type, content="direct-tcpip")
+  let target = @connection.decode_direct_tcpip(open.extra[:])
+  inspect(target.host, content="example.com")
+  inspect(target.port, content="80")
+  inspect(target.originator_host, content="127.0.0.1")
+  inspect(target.originator_port, content="54321")
+}
+
+///|
+test "direct-tcpip: a session open carries no type-specific data" {
+  let payload = @connection.encode_channel_open(
+    channel_type=@connection.CHANNEL_SESSION,
+    sender_channel=0,
+    initial_window_size=2097152,
+    maximum_packet_size=32768,
+  )
+  assert_eq(@connection.decode_channel_open(payload[:]).extra, b"")
+}
+
+///|
+test "direct-tcpip: a truncated or over-long target is refused" {
+  let good = @connection.encode_direct_tcpip_extra(
+    host="h",
+    port=80,
+    originator_host="o",
+    originator_port=1,
+  )
+  try @connection.decode_direct_tcpip(good[0:good.length() - 1]) catch {
+    ConnectionError(msg) => assert_true(msg.contains("direct-tcpip"))
+  } noraise {
+    _ => fail("expected a truncated target to raise")
+  }
+  try @connection.decode_direct_tcpip((good + b"\x00")[:]) catch {
+    ConnectionError(msg) => assert_true(msg.contains("direct-tcpip"))
+  } noraise {
+    _ => fail("expected trailing bytes to raise")
+  }
+}

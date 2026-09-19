@@ -1,7 +1,7 @@
 ///|
 /// Toy SSH server: key exchange, `publickey` and `password` user
 /// authentication, then one `session` channel running `exec` or a non-PTY
-/// `shell`.
+/// `shell`, plus optional `direct-tcpip` forwarding.
 ///
 /// ```
 /// server [--listen 127.0.0.1:2222]
@@ -16,6 +16,10 @@
 ///
 /// The passwords file is plaintext `user:password` lines. That is insecure
 /// and exists only because this is a toy.
+///
+/// `--allow-tcp-forwarding` honours `direct-tcpip` channels (what `ssh -L`
+/// opens). It is off by default: with it on, anyone who authenticates can
+/// make this process connect anywhere it can reach.
 ///
 /// Toy code. Never use for real security.
 
@@ -46,6 +50,10 @@ struct ServerOptions {
   /// was configured for.
   authorized_keys_paths : Array[(String, String)]
   passwords_path : String?
+  /// Whether `direct-tcpip` channels are honoured. Off unless asked for:
+  /// a server that dials anywhere an authenticated peer names is a relay
+  /// into whatever network it sits in.
+  allow_tcp_forwarding : Bool
 }
 
 ///|
@@ -88,7 +96,15 @@ async fn main {
     // Each connection owns a task group: the socket reader and writer, and
     // the child process's output pumps, all live in it.
     @async.with_task_group(group => {
-      serve(group, conn, peer, host_seed, authorized, passwords)
+      serve(
+        group,
+        conn,
+        peer,
+        host_seed,
+        authorized,
+        passwords,
+        allow_forward=opts.allow_tcp_forwarding,
+      )
     })
     @net.log("[\{peer}] closed")
   })
@@ -104,14 +120,19 @@ async fn[X] serve(
   host_seed : Bytes,
   authorized : Map[String, Array[@keys.PublicKey]],
   passwords : Map[String, String],
+  allow_forward~ : Bool,
 ) -> Unit {
   let t = @transport.Transport::new(@net.server_config(host_seed~))
   let c = @net.Conn::new(conn, t)
   // Created on Established, when the session id exists.
   let mut auth : @auth.AuthServer? = None
-  // Created once the user is authenticated and asks for a session.
-  let mut session : @connection.ServerSession? = None
-  let mut child : @net.Child? = None
+  // Created once the user is authenticated and opens a channel.
+  let state : ConnState = {
+    session: None,
+    children: Map([]),
+    forwards: Map([]),
+    allow_forward,
+  }
   c.run(group, (c, ev) => {
     match ev {
       Established(session_id~) => {
@@ -145,12 +166,7 @@ async fn[X] serve(
       }
       Packet(payload~) =>
         if auth is Some(a) && a.is_authenticated() {
-          match handle_connection(group, c, peer, a, session, child, payload) {
-            (s2, ch2) => {
-              session = s2
-              child = ch2
-            }
-          }
+          handle_connection(group, c, peer, a, state, payload)
         } else {
           handle_userauth(c, peer, auth, payload)
         }
@@ -160,17 +176,29 @@ async fn[X] serve(
         )
     }
   })
-  // The read side is done. A command still running would otherwise keep
-  // this connection's task group — and the socket — alive: `sleep 3600`
-  // outlived its client by an hour.
-  match child {
-    Some(ch) => {
-      @net.log("[\{peer}] peer gone, stopping pid \{ch.pid()}")
-      ch.close_stdin()
-      ch.cancel()
-    }
-    None => ()
+  // The read side is done. A command still running, or a forwarded
+  // connection still open, would otherwise keep this connection's task
+  // group — and the socket — alive: `sleep 3600` outlived its client by an
+  // hour.
+  for _, ch in state.children {
+    @net.log("[\{peer}] peer gone, stopping pid \{ch.pid()}")
+    ch.close_stdin()
+    ch.cancel()
   }
+  for _, fwd in state.forwards {
+    fwd.close()
+  }
+}
+
+///|
+/// Everything one authenticated connection owns, keyed by our channel id.
+/// A connection can now have several channels at once: one session and any
+/// number of forwards.
+struct ConnState {
+  mut session : @connection.ServerSession?
+  children : Map[UInt, @net.Child]
+  forwards : Map[UInt, @net.Forward]
+  allow_forward : Bool
 }
 
 ///|
@@ -233,63 +261,148 @@ async fn handle_userauth(
 
 ///|
 /// One decrypted payload after authentication: the connection protocol.
-/// Returns the session and child, which are created lazily when the peer
-/// opens a channel and asks to run something.
+/// Channels are created lazily, as the peer opens them.
 async fn[X] handle_connection(
   group : @async.TaskGroup[X],
   c : @net.Conn,
   peer : @socket.Addr,
   auth : @auth.AuthServer,
-  session : @connection.ServerSession?,
-  child : @net.Child?,
+  state : ConnState,
   payload : Bytes,
-) -> (@connection.ServerSession?, @net.Child?) {
-  let s = match session {
+) -> Unit {
+  let s = match state.session {
     Some(s) => s
-    None =>
-      @connection.ServerSession::new(
+    None => {
+      let s = @connection.ServerSession::new(
         window_size=CHANNEL_WINDOW,
         max_packet_size=CHANNEL_MAX_PACKET,
+        allow_forward=state.allow_forward,
       )
+      state.session = Some(s)
+      s
+    }
   }
-  let mut running = child
   let events = s.on_payload(payload[:]) catch {
     ConnectionError(msg) => {
       @net.log("[\{peer}] connection protocol error: \{msg}")
       c.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, msg)
-      return (Some(s), running)
+      return
     }
   }
   for ev in events {
     match ev {
-      ExecRequest(command) => {
+      ExecRequest(channel~, command~) => {
         @net.log(
           "[\{peer}] exec \{Repr(command)} as \{auth.user().unwrap_or("?")}",
         )
-        running = Some(start_child(group, c, peer, s, Some(command)))
+        state.children[channel] = start_child(
+          group,
+          c,
+          peer,
+          s,
+          channel,
+          Some(command),
+        )
       }
-      ShellRequest => {
+      ShellRequest(channel~) => {
         @net.log("[\{peer}] shell as \{auth.user().unwrap_or("?")}")
-        running = Some(start_child(group, c, peer, s, None))
+        state.children[channel] = start_child(group, c, peer, s, channel, None)
       }
-      Stdin(data) =>
-        match running {
-          Some(ch) => ch.write_stdin(data[:])
+      ForwardRequest(channel~, host~, port~) =>
+        // In its own task: the connect can take as long as the network
+        // does, and `Conn::run` awaits this handler, so connecting here
+        // would freeze every other channel on the connection.
+        group.spawn_bg(
+          () => start_forward(group, c, peer, s, state, channel, host, port),
+          no_wait=true,
+        )
+      Stdin(channel~, data~) =>
+        match (state.children.get(channel), state.forwards.get(channel)) {
+          (Some(ch), _) => ch.write_stdin(data[:])
+          (_, Some(fwd)) => fwd.write(data[:])
           // Data before a request: nothing is running to receive it.
-          None => ()
+          _ => ()
         }
-      StdinEof =>
-        match running {
+      StdinEof(channel~) =>
+        match state.children.get(channel) {
           Some(ch) => ch.close_stdin()
+          // A forward has no half-close to pass on (see net/forward.mbt);
+          // the target learns about it when the channel closes.
           None => ()
         }
-      Closed => @net.log("[\{peer}] channel closed")
+      Closed(channel~) => {
+        @net.log("[\{peer}] channel \{channel} closed")
+        match state.forwards.get(channel) {
+          Some(fwd) => {
+            fwd.close()
+            state.forwards.remove(channel)
+          }
+          None => ()
+        }
+        match state.children.get(channel) {
+          Some(ch) => {
+            // Cancel, not just close stdin: the channel is gone, so
+            // nothing can carry the command's output any more, and a
+            // command that ignores its stdin (`sleep 3600`) would
+            // otherwise keep this connection's task group alive long
+            // after the peer hung up.
+            ch.close_stdin()
+            ch.cancel()
+            state.children.remove(channel)
+          }
+          None => ()
+        }
+      }
     }
   }
-  for out in s.take_outgoing() {
-    c.send(out[:])
+  flush(c, s)
+}
+
+///|
+/// Connect out for a `direct-tcpip` channel and relay it. The channel is
+/// confirmed only once the connection stands, so a refused target reaches
+/// the peer as a CHANNEL_OPEN_FAILURE rather than as a channel that
+/// immediately closes.
+async fn[X] start_forward(
+  group : @async.TaskGroup[X],
+  c : @net.Conn,
+  peer : @socket.Addr,
+  s : @connection.ServerSession,
+  state : ConnState,
+  channel : UInt,
+  host : String,
+  port : UInt,
+) -> Unit {
+  @net.log("[\{peer}] direct-tcpip to \{host}:\{port}")
+  let fwd = @net.connect_forward(
+    group,
+    host~,
+    port=port.reinterpret_as_int(),
+    // Backpressure: the queue only drains as fast as the peer grants
+    // window credit, so without this a fast target and a slow peer put
+    // the whole transfer in memory.
+    () => s.queued_bytes(channel~),
+    chunk => {
+      s.send_data(channel~, chunk[:])
+      flush(c, s)
+    },
+    () => {
+      // The target hung up: end our half of the channel.
+      s.send_eof(channel~)
+      s.close_channel(channel~)
+      flush(c, s)
+    },
+  ) catch {
+    e => {
+      @net.log("[\{peer}] direct-tcpip to \{host}:\{port} failed: \{Repr(e)}")
+      s.forward_failed(channel~, description="connect failed")
+      flush(c, s)
+      return
+    }
   }
-  (Some(s), running)
+  state.forwards[channel] = fwd
+  s.forward_connected(channel~)
+  flush(c, s)
 }
 
 ///|
@@ -301,17 +414,18 @@ async fn[X] start_child(
   c : @net.Conn,
   peer : @socket.Addr,
   s : @connection.ServerSession,
+  channel : UInt,
   command : String?,
 ) -> @net.Child {
   let child = @net.spawn_session(
     group,
     command,
     chunk => {
-      s.send_stdout(chunk[:])
+      s.send_data(channel~, chunk[:])
       flush(c, s)
     },
     chunk => {
-      s.send_stderr(chunk[:])
+      s.send_stderr(channel~, chunk[:])
       flush(c, s)
     },
   )
@@ -321,7 +435,7 @@ async fn[X] start_child(
     // valid exit status; report it the way a shell does.
     let code = if status < 0 { 128 - status } else { status }
     @net.log("[\{peer}] pid \{child.pid()} exited with \{status}")
-    s.finish(exit_status=code.reinterpret_as_uint())
+    s.finish(channel~, exit_status=code.reinterpret_as_uint())
     flush(c, s)
   })
   child
@@ -421,14 +535,20 @@ fn parse_args(args : Array[String]) -> ServerOptions {
   let mut host_seed_hex : String? = None
   let authorized_keys_paths : Array[(String, String)] = []
   let mut passwords_path : String? = None
+  let mut allow_tcp_forwarding = false
   let mut i = 1
   while i < args.length() {
     let flag = args[i]
     if flag == "--help" {
       println(
-        "usage: server [--listen ADDR] (--host-key FILE | --host-seed-hex HEX) [--authorized-keys USER:FILE]... [--passwords FILE]",
+        "usage: server [--listen ADDR] (--host-key FILE | --host-seed-hex HEX) [--authorized-keys USER:FILE]... [--passwords FILE] [--allow-tcp-forwarding]",
       )
       @sys.exit(0)
+    }
+    if flag == "--allow-tcp-forwarding" {
+      allow_tcp_forwarding = true
+      i = i + 1
+      continue
     }
     guard i + 1 < args.length() else { usage_error("\{flag} needs a value") }
     let value = args[i + 1]
@@ -448,5 +568,6 @@ fn parse_args(args : Array[String]) -> ServerOptions {
     host_seed_hex,
     authorized_keys_paths,
     passwords_path,
+    allow_tcp_forwarding,
   }
 }

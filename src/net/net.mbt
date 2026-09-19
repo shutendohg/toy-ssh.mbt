@@ -28,8 +28,18 @@ pub async fn random_bytes(n : Int) -> Bytes {
 /// description), and `@ascii.encode` *panics* above 0x7f — which no
 /// `catch` can contain, so one packet would kill the process.
 pub async fn log(line : String) -> Unit {
+  // One writer at a time: `moonbitlang/async` allows a single task per
+  // handle, and two coroutines writing stderr at once panics inside the
+  // IO worker — which is what happened the first time several forwarded
+  // channels were opened concurrently.
+  log_lock.acquire()
+  defer log_lock.release()
   @stdio.stderr.write(@utf8.encode(line + "\n"))
 }
+
+///|
+/// Mutex for `log`: a semaphore with one permit.
+let log_lock : @semaphore.Semaphore = @semaphore.Semaphore(1, initial_value=1)
 
 ///|
 /// Whole-file text read. Key files, `authorized_keys` and `known_hosts`
