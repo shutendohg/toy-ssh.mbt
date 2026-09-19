@@ -7,6 +7,16 @@
 //
 // Toy code. Never use for real security.
 
+// glibc hides `posix_openpt`, `grantpt`, `unlockpt` and `ptsname` behind a
+// feature-test macro. Without it gcc assumes they return `int`, and the
+// truncated `ptsname` pointer segfaults the moment it is dereferenced --
+// which is exactly how this was found, on Linux CI, after a clean macOS
+// build (Apple's headers declare all four by default).
+#if defined(__linux__)
+#define _XOPEN_SOURCE 700
+#define _DEFAULT_SOURCE
+#endif
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
