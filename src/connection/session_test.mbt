@@ -223,13 +223,15 @@ test "protocol errors: wrong channel id, a second exec, and data after close" {
 }
 
 ///|
-test "a pty request is refused, and an unknown global request is answered" {
+test "an unsupported channel request is refused, as is an unknown global one" {
   let s = @connection.ServerSession::new(window_size=64, max_packet_size=64)
   let c = @connection.ClientSession::new(window_size=64, max_packet_size=64)
   c.request_shell()
   ignore(pump(c, s))
-  let pty = b"\x62\x00\x00\x00\x00\x00\x00\x00\x07pty-req\x01rest"
-  inspect(s.on_payload(pty[:]).length(), content="0")
+  // `pty-req` is implemented since M5, but only before the shell starts;
+  // `x11-req` is not implemented at all. Both are refused here.
+  let x11 = b"\x62\x00\x00\x00\x00\x00\x00\x00\x07x11-req\x01rest"
+  inspect(s.on_payload(x11[:]).length(), content="0")
   let reply = s.take_outgoing()
   inspect(reply.length(), content="1")
   inspect(@connection.decode_channel_failure(reply[0][:]), content="0")

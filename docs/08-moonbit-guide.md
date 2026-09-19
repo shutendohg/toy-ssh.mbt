@@ -299,3 +299,54 @@ for logging, because logging looks like a side effect rather than IO.
 It first appeared when `direct-tcpip` started doing its outbound connect in its own task
 (M5): eight concurrent `ssh -L` connections meant eight tasks logging at once, and the server
 died. `net.log` now takes a one-permit semaphore around the write.
+
+## C FFI (the pty, M5)
+
+The whole recipe: a `.c` file next to the MoonBit sources, listed in `moon.pkg` as
+`options("native-stub": ["pty_stub.c"])`, and declarations of the form
+
+```moonbit
+#borrow(buf)
+extern "C" fn pty_slave_name_ffi(fd : Int, buf : FixedArray[Byte], len : Int) -> Int = "toy_ssh_pty_slave_name"
+```
+
+`#borrow` (or `#owned`) is **required** on every pointer parameter — without it `moon check`
+fails rather than warns. `FixedArray[Byte]` arrives as `uint8_t*`, `FixedArray[Int]` as
+`int32_t*`, and plain `Int` as `int32_t`, which is enough for an out-parameter without any
+memory management crossing the boundary.
+
+Keep the C side as small as the thing that has no MoonBit equivalent. For the pty that is
+`grantpt` / `unlockpt` / `ptsname`, the `TIOCSWINSZ` ioctl, and one `open` — the master is
+opened as `/dev/ptmx` through `@fs.open`, so the async runtime owns the handle and reads it
+like any other file.
+
+### `O_NOCTTY`, and who is allowed to open a terminal
+
+Opening a terminal **without** `O_NOCTTY` makes it the controlling terminal of a process that
+is a session leader with none yet — which is how a daemonized server starts. A peer could
+then send signals to the server itself by typing them. The library's `open` adds only
+`O_CLOEXEC` (`internal/event_loop/fs.c`), and the public file API has no flag for this, so:
+
+- our own slave handle is opened by the C stub with `O_RDWR | O_NOCTTY`;
+- the **child** opens the terminal for its three standard streams, in a `sh` wrapper that
+  redirects and then `exec`s the real command. `@process.redirect_from_file` /
+  `redirect_to_file` look like the natural fit, but they open the path in the *calling*
+  process — so they would put the terminal back in the parent, without `O_NOCTTY`, and undo
+  the point of the stub. In the child the open is harmless: the child is not a session
+  leader. Everything the wrapper needs travels in the environment, never in the script text.
+
+### The descriptor dance around a pty
+
+Three things that each cost a debugging round:
+
+1. **A master with no slave attached fails reads immediately** (EIO on macOS) instead of
+   waiting. So the pty holds its own slave descriptor open from the moment it is created:
+   without it, a pump started before the child would fall straight out of its loop.
+2. **Closing the master does not interrupt a read already in flight.** A pump blocked on it
+   stays blocked for the life of the process. Closing the *slave* is what wakes a master
+   reader, because that is the end-of-file the kernel reports.
+3. **Reap the child before dropping our slave handle.** Dropping it right after `spawn`
+   races the child's own open of the slave — for that moment the master has no slave, and
+   (1) applies. So `Child::wait` on a pty session waits for the process, *then* releases the
+   slave, *then* joins the pump. That is the exact opposite of the pipe case, where the
+   pumps are joined first so that no output is lost.

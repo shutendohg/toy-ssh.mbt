@@ -33,15 +33,17 @@ Explicit non-goals (state these in code comments and READMEs too):
 
 - SSH-2 transport layer: version exchange, binary packet protocol, key exchange, encryption.
 - User authentication: `password` and `publickey` methods.
-- Connection layer: a single `session` channel supporting **remote command exec** and a
-  **minimal non-PTY shell**.
+- Connection layer: a `session` channel supporting **remote command exec** and a
+  **minimal shell**, on a pseudo-terminal when the peer asks for one (M5).
 - Both roles: a **client** (`ssh`-like) and a **server** (`sshd`-like).
 - **Interoperability with OpenSSH** in both directions is the acceptance bar
   (see [07-verification-plan.md](07-verification-plan.md)).
 
-Stretch goals (not required for "done"; see [06-milestones.md](06-milestones.md) M5):
-PTY allocation, `diffie-hellman-group14-sha256` + `rsa`, `aes128-ctr` + `hmac-sha2-256`,
-TCP port forwarding.
+Stretch goals (not required for "done"; see [06-milestones.md](06-milestones.md) M5).
+Three of the four were built after M6: PTY allocation, `aes128-ctr` + `hmac-sha2-256`, and
+`direct-tcpip` forwarding on the server side. `diffie-hellman-group14-sha256` + `rsa` was
+dropped deliberately — the negotiation seam it would have exercised is exercised by the
+other two.
 
 ## The one algorithm suite
 

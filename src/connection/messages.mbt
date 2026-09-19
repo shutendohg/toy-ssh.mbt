@@ -406,6 +406,19 @@ pub(all) enum ChannelRequestKind {
   Exec(String)
   Shell
   ExitStatus(UInt)
+  /// `pty-req` (RFC 4254 section 6.2). `modes` is the encoded terminal
+  /// modes string, kept raw: we pass the size on to the kernel but leave
+  /// the modes alone (docs/04).
+  PtyReq(
+    term~ : String,
+    cols~ : UInt,
+    rows~ : UInt,
+    width_px~ : UInt,
+    height_px~ : UInt,
+    modes~ : Bytes
+  )
+  /// `window-change` (RFC 4254 section 6.7).
+  WindowChange(cols~ : UInt, rows~ : UInt, width_px~ : UInt, height_px~ : UInt)
   Other(String)
 } derive(Debug, Eq)
 
@@ -462,6 +475,55 @@ pub fn encode_exit_status_request(
 }
 
 ///|
+/// `byte 98 || uint32 recipient || string "pty-req" || boolean || string
+/// TERM || uint32 x4 || string modes` (RFC 4254 section 6.2).
+pub fn encode_pty_request(
+  recipient_channel~ : UInt,
+  term~ : String,
+  cols~ : UInt,
+  rows~ : UInt,
+  width_px~ : UInt,
+  height_px~ : UInt,
+  modes~ : Bytes,
+  want_reply~ : Bool,
+) -> Bytes {
+  let w = @wire.Writer::new(size_hint=48 + term.length() + modes.length())
+  w.write_byte(SSH_MSG_CHANNEL_REQUEST)
+  w.write_uint32(recipient_channel)
+  w.write_str("pty-req")
+  w.write_boolean(want_reply)
+  w.write_str(term)
+  w.write_uint32(cols)
+  w.write_uint32(rows)
+  w.write_uint32(width_px)
+  w.write_uint32(height_px)
+  w.write_string(modes[:])
+  w.to_bytes()
+}
+
+///|
+/// `window-change` never asks for a reply (RFC 4254 section 6.7), so the
+/// boolean is always false.
+pub fn encode_window_change_request(
+  recipient_channel~ : UInt,
+  cols~ : UInt,
+  rows~ : UInt,
+  width_px~ : UInt,
+  height_px~ : UInt,
+) -> Bytes {
+  let w = @wire.Writer::new(size_hint=40)
+  w.write_byte(SSH_MSG_CHANNEL_REQUEST)
+  w.write_uint32(recipient_channel)
+  w.write_str("window-change")
+  w.write_boolean(false)
+  w.write_uint32(cols)
+  w.write_uint32(rows)
+  w.write_uint32(width_px)
+  w.write_uint32(height_px)
+  w.to_bytes()
+}
+
+///|
 /// Parse a CHANNEL_REQUEST. Request-specific fields are only read for the
 /// kinds we implement; an unknown request keeps its name and its tail is
 /// ignored, because we cannot know that tail's shape.
@@ -491,6 +553,35 @@ pub fn decode_channel_request(
       let code = r.read_uint32() catch { e => raise wire_error(ctx, e) }
       expect_end(r, ctx)
       ExitStatus(code)
+    }
+    "pty-req" => {
+      let req : ChannelRequestKind = try {
+        let term = r.read_str()
+        PtyReq(
+          term~,
+          cols=r.read_uint32(),
+          rows=r.read_uint32(),
+          width_px=r.read_uint32(),
+          height_px=r.read_uint32(),
+          modes=r.read_string().to_owned(),
+        )
+      } catch {
+        e => raise wire_error(ctx, e)
+      }
+      expect_end(r, ctx)
+      req
+    }
+    "window-change" => {
+      let req : ChannelRequestKind = WindowChange(
+        cols=r.read_uint32(),
+        rows=r.read_uint32(),
+        width_px=r.read_uint32(),
+        height_px=r.read_uint32(),
+      ) catch {
+        e => raise wire_error(ctx, e)
+      }
+      expect_end(r, ctx)
+      req
     }
     other => Other(other)
   }

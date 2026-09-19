@@ -282,6 +282,32 @@ fetches all returned the right sizes with the big file's `md5` matching, the dea
 the disabled server both failed the way they should with the connection intact, and the
 session channel returned `both` and exit 3 while the tunnel was in use.
 
+### 3h. PTY sessions (M5)
+
+Needs a real terminal to drive `ssh` from, so this one runs in a tmux (or herdr) pane rather
+than through a pipe. Start the toy server as in §3b — no extra flag, `pty-req` is honoured
+whenever it is asked for — and connect **without** `-T`:
+
+```
+ssh -p 2230 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./interop/pty_kh \
+    -o IdentitiesOnly=yes -i ./interop/client_ed25519 user@127.0.0.1
+```
+
+Inside the session, four things are worth checking, and each one fails differently:
+
+1. `tty` prints a terminal device (not "not a tty") — the shell really runs on a pty.
+2. `echo $TERM` matches the client's own `TERM` — `pty-req` carried it through.
+3. `stty size` matches the window — the size from `pty-req` reached `TIOCSWINSZ`.
+4. Resize the pane, then `stty size` again — `window-change` is being applied.
+
+Then `exit 5` and confirm `ssh` exits 5, and that `ssh -T … 'echo plain; exit 4'` still
+behaves as it did before (the non-pty path is a different code path now).
+
+Verified 2026-09-19 against OpenSSH_10.2p1: `tty` reported `/dev/ttys009` (matching the
+server's own log line), `TERM=xterm-256color`, `stty size` reported `29 119` and then
+`29 58` after the pane was resized, `exit 5` propagated, and the non-pty path returned
+`plain` with exit 4.
+
 ### 3d. Reading the debug output
 
 - `ssh -vvv`: look for `SSH2_MSG_KEXINIT`, `expecting SSH2_MSG_KEX_ECDH_REPLY`,
