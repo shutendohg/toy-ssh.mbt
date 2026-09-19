@@ -224,47 +224,150 @@ pub fn open_packet(
 }
 
 ///|
-/// One direction of an established record layer: the split key plus the
-/// running packet sequence number. `seq` starts at 0 (strict kex resets it
-/// after NEWKEYS), advances by one per packet sealed or successfully
-/// opened, and wraps mod 2^32 through `UInt` arithmetic. Mutable so the
-/// transport can reset it on NEWKEYS.
+/// The cipher/MAC pair a connection runs on. Both suites are negotiated
+/// by name (`cipher_method`); everything below dispatches on this, so a
+/// third one is a new arm rather than a new record layer.
+pub(all) enum CipherMethod {
+  /// `chacha20-poly1305@openssh.com`: AEAD, no separate MAC.
+  ChaCha20Poly1305
+  /// `aes128-ctr` with `hmac-sha2-256` (docs/06 M5).
+  Aes128CtrHmacSha256
+} derive(Debug, Eq)
+
+///|
+/// The negotiated cipher and MAC names, mapped to a method. The MAC name is
+/// ignored for an AEAD cipher (RFC 4253's MAC slot has no meaning there,
+/// which is why we advertise the AEAD without one).
+///
+/// A new non-AEAD suite has to be added to `needs_mac` in `kex.mbt` as
+/// well, or no MAC would be negotiated for it and this would answer
+/// `None` on a connection that should have worked.
+pub fn cipher_method(cipher : String, mac : String) -> CipherMethod? {
+  match cipher {
+    CIPHER_CHACHA20_POLY1305 => Some(ChaCha20Poly1305)
+    CIPHER_AES128_CTR =>
+      if mac == MAC_HMAC_SHA2_256 {
+        Some(Aes128CtrHmacSha256)
+      } else {
+        None
+      }
+    _ => None
+  }
+}
+
+///|
+/// Key material one direction needs, per RFC 4253 section 7.2: the initial
+/// IV (letters 'A'/'B'), the encryption key ('C'/'D') and the integrity key
+/// ('E'/'F'). An AEAD suite leaves `iv` and `mac` empty -- its nonce comes
+/// from the sequence number and its Poly1305 key from the stream.
+pub(all) struct DirectionKeys {
+  iv : Bytes
+  enc : Bytes
+  mac : Bytes
+} derive(Debug, Eq)
+
+///|
+/// Byte lengths of `iv`, `enc` and `mac` for this method.
+pub fn CipherMethod::key_lengths(self : CipherMethod) -> (Int, Int, Int) {
+  match self {
+    ChaCha20Poly1305 => (0, CHACHA20_POLY1305_KEY_LEN, 0)
+    Aes128CtrHmacSha256 =>
+      (@crypto.AES_BLOCK_LEN, @crypto.AES128_KEY_LEN, @crypto.HMAC_SHA256_LEN)
+  }
+}
+
+///|
+/// One direction of an established record layer: the method, its keys and
+/// the running packet sequence number (plus, for CTR, the running counter
+/// block, which never restarts -- RFC 4344 section 4). `seq` starts at 0
+/// (strict kex resets it after NEWKEYS), advances by one per packet sealed
+/// or successfully opened, and wraps mod 2^32.
 pub(all) struct RecordState {
-  key : RecordKey
+  suite : CipherMethod
+  keys : DirectionKeys
+  /// The AEAD's split key, precomputed; `None` for the CTR suite.
+  chacha : RecordKey?
   mut seq : UInt
+  /// CTR only: the counter block the next packet's keystream starts at.
+  mut counter : Bytes
 }
 
 ///|
-/// Fresh state for a 64-byte per-direction key, sequence number 0.
-pub fn RecordState::new(key : BytesView) -> RecordState {
-  { key: RecordKey::new(key), seq: 0, }
+/// Fresh state for one direction, sequence number 0. Key lengths come from
+/// our own derivation, so a mismatch aborts.
+pub fn RecordState::new(
+  suite : CipherMethod,
+  keys : DirectionKeys,
+) -> RecordState {
+  let (iv_len, enc_len, mac_len) = suite.key_lengths()
+  guard keys.iv.length() == iv_len &&
+    keys.enc.length() == enc_len &&
+    keys.mac.length() == mac_len else {
+    abort("RecordState::new: key material has the wrong length")
+  }
+  let chacha = match suite {
+    ChaCha20Poly1305 => Some(RecordKey::new(keys.enc[:]))
+    Aes128CtrHmacSha256 => None
+  }
+  { suite, keys, chacha, seq: 0, counter: keys.iv, }
 }
 
 ///|
-/// `seal_packet` with this state's key and sequence number, then advance
-/// the sequence number. On a raise nothing was sent, so `seq` stays put.
+/// Seal one packet with this state's keys and sequence number, then advance
+/// both counters. On a raise nothing was sent, so nothing moves.
 pub fn RecordState::seal_next(
   self : RecordState,
   payload : BytesView,
   fill~ : (Int) -> Bytes,
 ) -> Bytes raise ProtocolError {
-  let out = seal_packet(self.key, self.seq, payload, fill~)
+  let out = match self.chacha {
+    Some(key) => seal_packet(key, self.seq, payload, fill~)
+    None => {
+      let pkt = seal_ctr_packet(
+        self.keys,
+        self.seq,
+        self.counter[:],
+        payload,
+        fill~,
+      )
+      self.advance_counter(pkt.length() - @crypto.HMAC_SHA256_LEN)
+      pkt
+    }
+  }
   self.seq = self.seq + 1
   out
 }
 
 ///|
-/// `open_packet` with this state's key and sequence number. Advances the
-/// sequence number only when a packet is returned; `NeedMoreData` and a
-/// raised error leave it unchanged.
+/// Open one packet with this state's keys and sequence number. Advances the
+/// counters only when a packet is returned; `NeedMoreData` and a raised
+/// error leave the state untouched, so a retry with more bytes -- or the
+/// disconnect that follows a MAC failure -- sees the same keystream.
 pub fn RecordState::open_next(
   self : RecordState,
   buf : BytesView,
 ) -> PacketParse raise ProtocolError {
-  let result = open_packet(self.key, self.seq, buf)
+  let result = match self.chacha {
+    Some(key) => open_packet(key, self.seq, buf)
+    None => open_ctr_packet(self.keys, self.seq, self.counter[:], buf)
+  }
   match result {
-    Packet(..) => self.seq = self.seq + 1
+    Packet(consumed~, ..) => {
+      if self.chacha is None {
+        self.advance_counter(consumed - @crypto.HMAC_SHA256_LEN)
+      }
+      self.seq = self.seq + 1
+    }
     NeedMoreData => ()
   }
   result
+}
+
+///|
+/// Step the CTR counter past `cipher_len` bytes of keystream.
+fn RecordState::advance_counter(self : RecordState, cipher_len : Int) -> Unit {
+  self.counter = @crypto.ctr_advance(
+    self.counter[:],
+    cipher_len / @crypto.AES_BLOCK_LEN,
+  )
 }

@@ -298,3 +298,47 @@ stdin/stdout/stderr to the channel, and report its exit code. No line editing, n
 control, no terminal modes. This is enough to run `ssh -T toyserver` and type commands, and to
 run `ssh toyserver 'uname -a'` via exec. Process spawning uses `moonbitlang/async`'s
 `process` package (see [08](08-moonbit-guide.md)).
+
+### `direct-tcpip` port forwarding (M5, server side)
+
+`ssh -L <lport>:<host>:<port>` opens **one channel per accepted local connection**, so this
+is the milestone where the server stops having a single hard-wired channel and keeps a table
+of them. The CHANNEL_OPEN carries four extra fields after the usual ones (RFC 4254 §7.2):
+
+```
+string  host to connect
+uint32  port to connect
+string  originator IP address
+uint32  originator port
+```
+
+The originator is informational; we do not act on it. Rules we follow:
+
+- **Off by default.** `direct-tcpip` is refused with
+  `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED` unless the server was started with
+  `--allow-tcp-forwarding`. A toy server that dials anywhere an authenticated peer names is a
+  relay into whatever network it sits in; OpenSSH's `AllowTcpForwarding no` exists for the
+  same reason.
+- **Confirm only after the connect succeeds.** The channel is held unconfirmed while the TCP
+  connection is attempted; a refused or unreachable target becomes
+  `SSH_OPEN_CONNECT_FAILED`, not a channel that opens and immediately closes.
+- **A malformed target is a protocol error**, not a polite refusal: a channel whose
+  parameters we cannot read is one we must not open.
+- **The connect happens off the connection's read loop.** The event handler runs on the task
+  that reads the socket, so dialling out there would freeze every other channel for as long
+  as the connect takes — up to the OS timeout for an address that silently drops packets.
+- **Writes to the target are still on that loop**, so a target that stops reading long
+  enough to fill its socket buffer does stall the connection. Fixing that needs a per-forward
+  writer task; `Child::write_stdin` has the same shape. Toy limitation.
+- **The read pump stops while a window's worth of output is already queued**, so a fast
+  target and a slow peer do not put the whole transfer in memory.
+- **No half-close.** `moonbitlang/async` exposes no socket shutdown, so a peer's CHANNEL_EOF
+  cannot become a FIN on the forwarded socket; the target sees the close only when the
+  channel closes. A protocol that waits for a half-close (HTTP/1.0 with no length) will hang.
+- **Channel ids are never reused**, so a stale message naming a closed channel is rejected
+  rather than landing on a new one.
+- Channel requests (`exec`, `shell`, `pty-req`) on a forwarded channel are refused: it
+  carries bytes, not commands.
+
+The client side (`-L` on the toy client) is **not** implemented; the toy client still opens
+exactly one `session` channel.

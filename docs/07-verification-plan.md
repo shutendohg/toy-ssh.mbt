@@ -215,6 +215,73 @@ Expected: `sshd` logs `debug1: kex: algorithm: mlkem768x25519-sha256` and
 Verified 2026-09-16 against OpenSSH_10.2p1 in both directions, with the classical exchange
 re-checked in the same run.
 
+### 3f. The `aes128-ctr` + `hmac-sha2-256` suite (M5)
+
+Force the second suite on each side in turn, the same way §3e forces the hybrid kex, so a
+silent fallback to the AEAD cannot pass for success.
+
+**OpenSSH `ssh` → toy server.** Start the toy server as in §3b, then:
+
+```
+ssh -vv -T -p 2222 -c aes128-ctr -m hmac-sha2-256 \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=./interop/m5_kh \
+    -o IdentitiesOnly=yes -i ./interop/client_ed25519 \
+    user@127.0.0.1 'echo ctr-hello; exit 3'
+```
+
+Expected: `debug1: kex: client->server cipher: aes128-ctr MAC: hmac-sha2-256` (and the same
+for server->client), the output on stdout, `ssh` exiting 3. Repeat with a bulk command
+(`seq 1 20000`) and compare a checksum: a counter that restarted per packet still passes a
+one-packet test.
+
+**Toy client → OpenSSH `sshd`.** Copy `interop/sshd_config` with `Ciphers aes128-ctr` and
+`MACs hmac-sha2-256`, start `sshd -ddd` on it as in §3c, then pass `-c aes128-ctr` to the toy
+client (without it the client offers the AEAD first and gets it):
+
+```
+client -p 2200 -c aes128-ctr -i ./interop/client_ed25519 \
+       --known-hosts ./interop/m5_toy_kh $(whoami)@127.0.0.1 'uname -s; exit 6'
+```
+
+Expected: `sshd` logs the `aes128-ctr` / `hmac-sha2-256` pair and `Accepted publickey`, the
+output arrives, the client exits 6.
+
+Verified 2026-09-19 against OpenSSH_10.2p1 in both directions: `echo` + exit 3, 20000 lines
+byte-identical (`md5` matched) with stderr kept separate and exit 7, `uname -s` + exit 6 from
+the toy client. The default suite was re-checked in the same run, both ways (exit 4 / exit 5).
+
+### 3g. `direct-tcpip` forwarding (M5)
+
+Needs a third party: something to forward *to*. A `python3 -m http.server` in the interop
+directory does, because the fetched bytes can be compared with the file on disk.
+
+```
+python3 -m http.server 8899 --bind 127.0.0.1        # the target
+server --listen 127.0.0.1:2224 --host-key ./interop/host_ed25519 \
+       --authorized-keys user:./interop/toy_authorized_keys --allow-tcp-forwarding
+ssh -N -L 9099:127.0.0.1:8899 -p 2224 -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile=./interop/fwd_kh -o IdentitiesOnly=yes \
+    -i ./interop/client_ed25519 user@127.0.0.1
+```
+
+Then fetch `http://127.0.0.1:9099/<file>` and compare it byte for byte with
+`interop/<file>`. Four more cases matter, because each exercises a different path:
+
+1. **Several connections at once** (eight parallel fetches, one of them a ~100 KB file):
+   this is what the channel table and per-channel windows are for.
+2. **A dead target** (`-L 9100:127.0.0.1:1`): the server logs the failed connect, the peer
+   sees `open failed: connect failed`, and the SSH connection survives.
+3. **Forwarding not enabled** (start the server without `--allow-tcp-forwarding`): `ssh`
+   prints `open failed: administratively prohibited: tcp forwarding is not enabled on this
+   server`, and again the connection survives.
+4. **A session alongside a forward** (`ssh -T -L ... user@host 'sleep 2; echo both; exit 3'`,
+   fetching through the tunnel while the command runs): both channels must work at once.
+
+Verified 2026-09-19 against OpenSSH_10.2p1: the fetched file was identical, eight concurrent
+fetches all returned the right sizes with the big file's `md5` matching, the dead target and
+the disabled server both failed the way they should with the connection intact, and the
+session channel returned `both` and exit 3 while the tunnel was in use.
+
 ### 3d. Reading the debug output
 
 - `ssh -vvv`: look for `SSH2_MSG_KEXINIT`, `expecting SSH2_MSG_KEX_ECDH_REPLY`,

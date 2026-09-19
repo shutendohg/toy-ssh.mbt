@@ -5,9 +5,12 @@
 /// Fixed, obviously-not-random inputs. Client scalar / server scalar are
 /// the RFC 7748 section 6.1 Alice / Bob secrets; the host seed is RFC 8032
 /// TEST 1.
-fn client_config() -> @transport.TransportConfig raise {
+fn client_config(
+  ciphers? : Array[String]? = None,
+) -> @transport.TransportConfig raise {
   {
     role: Client,
+    ciphers,
     cookie: Bytes::make(16, b'\x11'),
     ephemeral_scalar: @hex.decode(
       "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
@@ -20,9 +23,12 @@ fn client_config() -> @transport.TransportConfig raise {
 }
 
 ///|
-fn server_config() -> @transport.TransportConfig raise {
+fn server_config(
+  ciphers? : Array[String]? = None,
+) -> @transport.TransportConfig raise {
   {
     role: Server,
+    ciphers,
     cookie: Bytes::make(16, b'\x22'),
     ephemeral_scalar: @hex.decode(
       "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
@@ -376,6 +382,7 @@ test "non-strict peer: IGNORE during kex is skipped and seqnums carry over" {
     k_encoded=@transport.shared_secret_mpint(k[:]),
   )
   let keys = @transport.derive_session_keys(
+    ChaCha20Poly1305,
     @transport.shared_secret_mpint(k[:])[:],
     h[:],
     h[:],
@@ -391,7 +398,7 @@ test "non-strict peer: IGNORE during kex is skipped and seqnums carry over" {
     fail("expected Established, got \{show_events(ev)}")
   }
   let enc_req = @transport.seal_packet(
-    @transport.RecordKey::new(keys.send_key(Client)[:]),
+    @transport.RecordKey::new(keys.send_keys(Client).enc[:]),
     4,
     @transport.encode_service_request("ssh-userauth")[:],
     fill=@transport.zero_padding,
@@ -406,7 +413,7 @@ test "non-strict peer: IGNORE during kex is skipped and seqnums carry over" {
   s.send_packet(b"\x06\x00\x00\x00\x00"[:])
   let enc = s.take_outgoing()
   guard @transport.open_packet(
-      @transport.RecordKey::new(keys.recv_key(Client)[:]),
+      @transport.RecordKey::new(keys.recv_keys(Client).enc[:]),
       3,
       enc[:],
     )
@@ -568,4 +575,78 @@ test "send_packet and disconnect after close are no-ops" {
   c.send_packet(b"\x05\x00\x00\x00\x00"[:])
   c.disconnect(@transport.SSH_DISCONNECT_PROTOCOL_ERROR, "again")
   assert_eq(c.take_outgoing().length(), 0)
+}
+
+///|
+test "self-interop: the whole handshake and traffic over aes128-ctr" {
+  let only_ctr = Some([@transport.CIPHER_AES128_CTR])
+  let c = @transport.Transport::new(client_config(ciphers=only_ctr))
+  let s = @transport.Transport::new(server_config(ciphers=only_ctr))
+  let (ec, es) = pump(c, s)
+  guard ec[0] is Established(session_id=sid_c) else {
+    fail("client: \{show_events(ec)}")
+  }
+  guard es[0] is Established(session_id=sid_s) else {
+    fail("server: \{show_events(es)}")
+  }
+  assert_eq(sid_c, sid_s)
+  // Traffic both ways, several packets deep: CTR keeps one counter per
+  // direction running across packets, so a second packet that restarted
+  // the keystream would decrypt to garbage here.
+  for i in 0..<5 {
+    c.send_packet(
+      b"\x05\x00\x00\x00\x01" + Bytes::make(1, (0x30 + i).to_byte()),
+    )
+    s.send_packet(
+      b"\x06\x00\x00\x00\x01" + Bytes::make(1, (0x40 + i).to_byte()),
+    )
+  }
+  let (ec2, es2) = pump(c, s)
+  assert_eq(es2.length(), 5)
+  assert_eq(ec2.length(), 5)
+  for i in 0..<5 {
+    guard es2[i] is Packet(payload=to_server) else { fail("expected Packet") }
+    guard ec2[i] is Packet(payload=to_client) else { fail("expected Packet") }
+    assert_eq(to_server[5], (0x30 + i).to_byte())
+    assert_eq(to_client[5], (0x40 + i).to_byte())
+  }
+}
+
+///|
+test "self-interop: a client with no cipher in common is a key exchange failure" {
+  let c = @transport.Transport::new(
+    client_config(ciphers=Some([@transport.CIPHER_AES128_CTR])),
+  )
+  let s = @transport.Transport::new(
+    server_config(ciphers=Some([@transport.CIPHER_CHACHA20_POLY1305])),
+  )
+  let (_, es) = pump(c, s)
+  guard es[0] is Disconnect(code~, description~, by_peer=false) else {
+    fail("server: \{show_events(es)}")
+  }
+  assert_eq(code, @transport.SSH_DISCONNECT_KEY_EXCHANGE_FAILED)
+  assert_true(description.contains("no common cipher"))
+}
+
+///|
+test "disconnect: corrupted aes128-ctr ciphertext is a MAC error" {
+  let only_ctr = Some([@transport.CIPHER_AES128_CTR])
+  let c = @transport.Transport::new(client_config(ciphers=only_ctr))
+  let s = @transport.Transport::new(server_config(ciphers=only_ctr))
+  ignore(pump(c, s))
+  c.send_packet(@transport.encode_service_request("ssh-userauth")[:])
+  let pkt = c.take_outgoing()
+  // Flip a bit in the MAC, which is never part of the framing.
+  let bad = Bytes::makei(pkt.length(), i => {
+    if i == pkt.length() - 1 {
+      pkt[i] ^ b'\x01'
+    } else {
+      pkt[i]
+    }
+  })
+  let es = s.on_received(bad[:])
+  guard es[0] is Disconnect(code~, by_peer=false, ..) else {
+    fail("server: \{show_events(es)}")
+  }
+  assert_eq(code, @transport.SSH_DISCONNECT_MAC_ERROR)
 }

@@ -40,15 +40,15 @@ test "exec: open, run, stdout, stderr, exit status and dual close" {
   let (ce, se) = pump(c, s)
   // The server saw the open and the exec request.
   guard se.length() == 1 else { fail("server events: \{se.length()}") }
-  guard se[0] is ExecRequest(command) else { fail("expected ExecRequest") }
+  guard se[0] is ExecRequest(command~, ..) else { fail("expected ExecRequest") }
   inspect(command, content="echo hello")
   // The client saw the channel open and its request succeed.
   inspect(ce.length(), content="0")
   assert_true(c.is_running())
   // The server streams output, then reports the exit status and closes.
-  s.send_stdout(b"hello\n")
-  s.send_stderr(b"oops\n")
-  s.finish(exit_status=3)
+  s.send_data(channel=0, b"hello\n")
+  s.send_stderr(channel=0, b"oops\n")
+  s.finish(channel=0, exit_status=3)
   let (ce2, _) = pump(c, s)
   let seen = ce2.map(e => {
     match e {
@@ -77,19 +77,19 @@ test "shell: the server is told to start a shell" {
   let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
   c.request_shell()
   let (_, se) = pump(c, s)
-  guard se.length() == 1 && se[0] is ShellRequest else {
+  guard se.length() == 1 && se[0] is ShellRequest(..) else {
     fail("expected ShellRequest")
   }
   // Client stdin reaches the server as channel data.
   c.send_stdin(b"pwd\n")
   let (_, se2) = pump(c, s)
   guard se2.length() == 1 else { fail("server events: \{se2.length()}") }
-  guard se2[0] is Stdin(data) else { fail("expected Stdin") }
+  guard se2[0] is Stdin(data~, ..) else { fail("expected Stdin") }
   inspect(@hex.encode(data[:]), content="7077640a")
   // And the client's EOF closes the server's stdin.
   c.send_eof()
   let (_, se3) = pump(c, s)
-  guard se3.length() == 1 && se3[0] is StdinEof else {
+  guard se3.length() == 1 && se3[0] is StdinEof(..) else {
     fail("expected StdinEof")
   }
 }
@@ -124,7 +124,7 @@ test "windowing: data is split to the peer's maximum packet size" {
   let s = @connection.ServerSession::new(window_size=4096, max_packet_size=128)
   c.request_exec("cat")
   ignore(pump(c, s))
-  s.send_stdout(Bytes::makei(300, i => (i % 251).to_byte()))
+  s.send_data(channel=0, Bytes::makei(300, i => (i % 251).to_byte()))
   let out = s.take_outgoing()
   inspect(out.length(), content="3")
   let mut total = 0
@@ -146,7 +146,7 @@ test "windowing: the sender stops at the peer's window and resumes on adjust" {
   let s = @connection.ServerSession::new(window_size=4096, max_packet_size=128)
   c.request_exec("cat")
   ignore(pump(c, s))
-  s.send_stdout(Bytes::make(25, b'x'))
+  s.send_data(channel=0, Bytes::make(25, b'x'))
   let first = s.take_outgoing()
   let mut sent = 0
   for p in first {
@@ -287,8 +287,8 @@ test "ordering: the server's exit status and close follow its last output" {
   let s = @connection.ServerSession::new(window_size=4096, max_packet_size=128)
   c.request_exec("seq 1 100")
   ignore(pump(c, s))
-  s.send_stdout(Bytes::make(25, b'o'))
-  s.finish(exit_status=0)
+  s.send_data(channel=0, Bytes::make(25, b'o'))
+  s.finish(channel=0, exit_status=0)
   let first = s.take_outgoing()
   inspect(first.length(), content="1")
   inspect(first[0][0].to_int(), content="94")
@@ -314,7 +314,7 @@ test "ordering: flow control is never blocked behind our own data" {
   c.request_exec("cat")
   ignore(pump(c, s))
   // Exhaust the server's credit so its own output is stuck.
-  s.send_stdout(Bytes::make(500, b'o'))
+  s.send_data(channel=0, Bytes::make(500, b'o'))
   ignore(s.take_outgoing())
   // The client now sends enough to owe the server a WINDOW_ADJUST.
   c.send_stdin(Bytes::make(80, b'i'))
@@ -354,7 +354,7 @@ test "a peer advertising an absurd window and packet size cannot make us overrun
   )
   ignore(s.take_outgoing())
   // One megabyte of output, far more than any single packet may carry.
-  s.send_stdout(Bytes::make(1048576, b'o'))
+  s.send_data(channel=0, Bytes::make(1048576, b'o'))
   let out = s.take_outgoing()
   assert_true(out.length() > 1)
   let mut total = 0

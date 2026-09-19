@@ -8,6 +8,17 @@ fn test_key() -> Bytes {
 }
 
 ///|
+/// A fresh AEAD record state on `test_key()`; the suite has no IV and no
+/// separate MAC key, so both are empty.
+fn chacha_state() -> @transport.RecordState {
+  @transport.RecordState::new(ChaCha20Poly1305, {
+    iv: b"",
+    enc: test_key(),
+    mac: b"",
+  })
+}
+
+///|
 test "RecordKey: content key is bytes 0..32, length key is bytes 32..64" {
   let k = @transport.RecordKey::new(test_key()[:])
   assert_eq(k.content, test_key()[0:32].to_owned())
@@ -480,8 +491,8 @@ test "open_packet: rejects bad padding_length inside an authenticated body" {
 
 ///|
 test "RecordState: seq advances per packet and wraps mod 2^32" {
-  let tx = @transport.RecordState::new(test_key()[:])
-  let rx = @transport.RecordState::new(test_key()[:])
+  let tx = chacha_state()
+  let rx = chacha_state()
   assert_eq(tx.seq, 0)
   let p0 = tx.seal_next(b"one"[:], fill=@transport.zero_padding)
   assert_eq(tx.seq, 1)
@@ -511,7 +522,7 @@ test "RecordState: seq advances per packet and wraps mod 2^32" {
   }
   assert_eq(rx.seq, 2)
   // Wrap-around: 0xffffffff + 1 == 0 (UInt arithmetic).
-  let wrap = @transport.RecordState::new(test_key()[:])
+  let wrap = chacha_state()
   wrap.seq = 0xffffffffU
   ignore(wrap.seal_next(b""[:], fill=@transport.zero_padding))
   assert_eq(wrap.seq, 0)
@@ -519,8 +530,8 @@ test "RecordState: seq advances per packet and wraps mod 2^32" {
 
 ///|
 test "RecordState: NeedMoreData and a failed open do not advance seq" {
-  let tx = @transport.RecordState::new(test_key()[:])
-  let rx = @transport.RecordState::new(test_key()[:])
+  let tx = chacha_state()
+  let rx = chacha_state()
   let pkt = tx.seal_next(b"hello"[:], fill=@transport.zero_padding)
   debug_inspect(rx.open_next(pkt[0:pkt.length() - 1]), content="NeedMoreData")
   assert_eq(rx.seq, 0)
