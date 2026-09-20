@@ -34,7 +34,12 @@ pub async fn log(line : String) -> Unit {
   // channels were opened concurrently.
   log_lock.acquire()
   defer log_lock.release()
-  @stdio.stderr.write(@utf8.encode(line + "\n"))
+  // A raw terminal does not turn "\n" into a carriage return and a line
+  // feed, so a diagnostic printed while the client mirrors a remote
+  // terminal would stair-step down the screen. Only when it really is
+  // that terminal: redirected to a file, plain "\n" is what belongs there.
+  let ending = if log_needs_crlf() { "\r\n" } else { "\n" }
+  @stdio.stderr.write(@utf8.encode(line + ending))
 }
 
 ///|

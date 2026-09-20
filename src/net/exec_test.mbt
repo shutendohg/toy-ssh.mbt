@@ -156,3 +156,26 @@ async test "wait returns only after every byte of output has been delivered" {
     assert_eq(lines, 50000)
   })
 }
+
+///|
+/// The local-terminal FFI links and marshals correctly. What it reports
+/// depends on how the tests were started, so the test asserts the
+/// invariants rather than a fixed size: a size is only ever reported for
+/// a terminal, and a reported size is never zero (a terminal nobody has
+/// sized answers `TIOCGWINSZ` with zeroes, and a `pty-req` carrying 0x0
+/// makes a remote full-screen program draw into nothing).
+test "local terminal: a reported size means a terminal, and is never zero" {
+  match @net.terminal_size() {
+    Some(size) => {
+      assert_true(@net.stdin_is_terminal())
+      assert_true(size.cols > 0)
+      assert_true(size.rows > 0)
+    }
+    None => ()
+  }
+}
+
+///|
+test "local terminal: TERM is never reported as empty" {
+  assert_true(@net.terminal_type() != "")
+}
