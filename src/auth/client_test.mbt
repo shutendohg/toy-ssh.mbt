@@ -242,3 +242,28 @@ test "client: PK_OK must echo the algorithm and blob we offered" {
   }
   inspect(bad_alg.take_outgoing().length(), content="0")
 }
+
+///|
+/// A FAILURE names the method it is answering, so a caller can tell the
+/// opening `none` probe — which every server refuses — from a credential
+/// that was actually rejected.
+test "client: a failure says which method was refused" {
+  let c = test_client(probe_none=true, password=Some("hunter2"))
+  ignore(c.take_outgoing())
+  let refused_probe = c.on_payload(
+    @auth.encode_userauth_failure(["password"], false)[:],
+  )
+  guard refused_probe[0] is Failure(refused~, ..) else {
+    fail("expected Failure, got \{Repr(refused_probe[0])}")
+  }
+  inspect(refused, content="none")
+  // The probe moved us on to `password`; refusing that one names it.
+  ignore(c.take_outgoing())
+  let refused_password = c.on_payload(
+    @auth.encode_userauth_failure(["password"], false)[:],
+  )
+  guard refused_password[0] is Failure(refused~, ..) else {
+    fail("expected Failure, got \{Repr(refused_password[0])}")
+  }
+  inspect(refused, content="password")
+}

@@ -140,6 +140,9 @@ async fn[X] serve(
         @net.log(
           "[\{peer}] established, session id \{@hex.encode(session_id[:])}",
         )
+        if c.transport().negotiated() is Some(n) {
+          @net.log("[\{peer}] \{n.summary()}")
+        }
         auth = Some(
           @auth.AuthServer::new({
             session_id,

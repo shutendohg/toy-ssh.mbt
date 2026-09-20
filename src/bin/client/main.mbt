@@ -186,6 +186,9 @@ async fn main {
           @net.log(
             "toy-ssh client: established, session id \{@hex.encode(session_id[:])}",
           )
+          if c.transport().negotiated() is Some(n) {
+            @net.log("toy-ssh client: \{n.summary()}")
+          }
           auth = Some(
             @auth.AuthClient::new({
               user: opts.user,
@@ -304,10 +307,17 @@ async fn handle_userauth(
           @net.log("toy-ssh client: authenticated as \{opts.user}")
           on_success()
         }
-        Failure(methods~, partial~) =>
-          @net.log(
-            "toy-ssh client: authentication failed, server offers [\{methods.join(", ")}] partial=\{partial}",
-          )
+        Failure(refused~, methods~, partial~) =>
+          // The opening `none` probe is a question, not an attempt: every
+          // server refuses it, and calling that "authentication failed"
+          // sent the reader hunting for a problem that was not there.
+          if refused == @auth.METHOD_NONE {
+            @net.log("toy-ssh client: server accepts [\{methods.join(", ")}]")
+          } else {
+            @net.log(
+              "toy-ssh client: \{refused} was refused, still offered [\{methods.join(", ")}] partial=\{partial}",
+            )
+          }
         GiveUp(why) => @net.log("toy-ssh client: giving up: \{why}")
         ProtocolViolation(msg) => {
           @net.log("toy-ssh client: protocol violation: \{msg}")
