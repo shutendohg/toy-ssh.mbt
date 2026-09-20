@@ -347,6 +347,27 @@ OpenSSH_10.2p1 `sshd` (port 2200, `sshd -ddd -f interop/sshd_config`):
   `stty size` `24 80`, exit 8. Interactively `stty size` went from `28 58` to `28 28` when
   the pane was resized, and `^C` interrupted a running `sleep 20`.
 
+**On a server that is not on this machine.** Everything above runs over loopback, which
+hides nothing about the protocol but does hide how it feels. Verified 2026-09-21 against
+Ubuntu 24.04.5 (OpenSSH 9.6) across the LAN, publickey with the user's own
+`~/.ssh/id_ed25519`:
+
+- The login shell (`fish`) drew its full prompt, in colour, with its exit-status readout —
+  the thing that was missing before the client asked for a terminal, and the reason this
+  work exists.
+- Resizing the window moved `stty size` with it: `window-change` reaches a real server.
+- `^C` interrupted a running `sleep 30`; `fish` reported 130, and the client stayed up.
+- `exit 9` propagated, and `stty -a` on the local shell afterwards showed
+  `icanon isig echo` — the terminal came back.
+- The negotiated line read `kex=curve25519-sha256 host-key=ssh-ed25519
+  cipher=chacha20-poly1305@openssh.com strict-kex=true`. OpenSSH 9.6 predates
+  `mlkem768x25519-sha256`, so the fallback to the classical curve is expected — and until
+  the summary line existed there was no way to see which one a real peer had chosen.
+
+Note that the tilde in `-i ~/.ssh/id_ed25519` will not survive being held in a shell
+variable: tilde expansion runs before parameter expansion, so `K="-i ~/.ssh/id_ed25519"`
+passes the key path through literally and the client cannot open it. Use `$HOME`.
+
 Two more cases, added after the code review of the same change:
 
 - **A server that refuses the terminal.** Copy `interop/sshd_config` with `PermitTTY no` and
