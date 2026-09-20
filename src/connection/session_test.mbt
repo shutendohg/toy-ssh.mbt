@@ -58,6 +58,7 @@ test "exec: open, run, stdout, stderr, exit status and dual close" {
       Eof => "eof"
       Closed => "closed"
       OpenFailed(reason~, description~) => "openfail:\{reason}:\{description}"
+      PtyRefused => "ptyrefused"
     }
   })
   debug_inspect(

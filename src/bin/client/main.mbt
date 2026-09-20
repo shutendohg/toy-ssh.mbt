@@ -5,14 +5,21 @@
 ///
 /// ```
 /// client [-p PORT] [-i KEYFILE] [--known-hosts FILE] [--password PW]
-///        [--strict-host-key-checking] [-c CIPHER] [USER@]HOST [COMMAND]
+///        [--strict-host-key-checking] [-c CIPHER] [-t] [-T]
+///        [USER@]HOST [COMMAND]
 /// ```
 ///
 /// With a COMMAND the client runs it and exits with its status, like
 /// `ssh host command`. Without one it asks for the remote shell and pipes
-/// this process's standard input to it (no PTY, so no line editing).
-/// The command's standard output goes to ours verbatim; diagnostics go to
-/// standard error.
+/// this process's standard input to it. The command's standard output goes
+/// to ours verbatim; diagnostics go to standard error.
+///
+/// A shell gets a terminal when this process has one, the way `ssh` does:
+/// the client asks for `pty-req`, puts its own terminal into raw mode so
+/// that echo, line editing and `^C` become the remote end's business, and
+/// reports every resize with `window-change`. `-T` asks for no terminal
+/// (pipes, no line editing); `-t` asks for one even without a local
+/// terminal to mirror.
 ///
 /// `-c` pins one cipher (`chacha20-poly1305@openssh.com` or `aes128-ctr`)
 /// instead of offering both, which is how the docs/07 interop runs exercise
@@ -38,6 +45,9 @@ struct ClientOptions {
   command : String?
   /// The only cipher to offer, or `None` for our default preference.
   cipher : String?
+  /// `-t` / `-T`. `None` means "decide from the request and the terminal":
+  /// a shell run from a terminal gets one, everything else does not.
+  pty : Bool?
 }
 
 ///|
@@ -52,6 +62,22 @@ const CHANNEL_WINDOW : UInt = 2097152
 
 ///|
 const CHANNEL_MAX_PACKET : UInt = 32768
+
+///|
+/// How often the client re-reads its terminal size to notice a resize.
+/// `moonbitlang/async` routes only the cancellation signals (SIGINT,
+/// SIGTERM, SIGHUP), so SIGWINCH has nowhere to arrive; a C handler would
+/// still have to be polled to reach async code, and the runtime reserves
+/// the right to change the signal mask. Asking the kernel is one ioctl.
+const WINCH_POLL_MS : Int = 200
+
+///|
+/// What a forced `-t` reports when there is no local terminal to measure.
+/// The RFC's own example is 80x24.
+const DEFAULT_COLS : UInt = 80
+
+///|
+const DEFAULT_ROWS : UInt = 24
 
 ///|
 /// Print a usage error and exit 2. Generic in its return type so it can
@@ -177,6 +203,20 @@ async fn main {
   let mut authenticated = false
   let mut session : @connection.ClientSession? = None
   let mut exit_status : UInt? = None
+  // Set while our own terminal is in raw mode. Every path out of `main`
+  // has to put it back: a client that exits raw leaves a shell with no
+  // echo and no line editing.
+  let mut raw : @net.RawTerminal? = None
+  fn restore_terminal() -> Unit {
+    if raw is Some(terminal) {
+      terminal.restore()
+    }
+  }
+
+  // Covers the paths that leave `main` by raising — a refused host key, a
+  // dropped connection. `@sys.exit` does not run defers, so the ordinary
+  // paths below call `restore_terminal` themselves.
+  defer restore_terminal()
   @async.with_task_group(group => {
     c.run(group, (c, ev) => {
       // Flush anything the synchronous host key callback queued.
@@ -225,6 +265,19 @@ async fn main {
                     window_size=CHANNEL_WINDOW,
                     max_packet_size=CHANNEL_MAX_PACKET,
                   )
+                  if wanted_pty(opts) is Some(pty) {
+                    s.request_pty(pty)
+                    // Raw from here on: echo, line editing and the signal
+                    // characters are the remote terminal's business now,
+                    // and `^C` has to travel as a byte.
+                    raw = @net.enter_raw_mode()
+                    if raw is None && @net.stdin_is_terminal() {
+                      @net.log(
+                        "toy-ssh client: could not switch the terminal to raw mode; expect doubled echo",
+                      )
+                    }
+                    group.spawn_bg(no_wait=true, () => watch_window_size(c, s))
+                  }
                   match opts.command {
                     Some(command) => s.request_exec(command)
                     None => s.request_shell()
@@ -257,6 +310,9 @@ async fn main {
     })
   })
   drain()
+  // Before anything that exits, and before the shell prompt this process
+  // returns to.
+  restore_terminal()
   if learned is Some(public) && authenticated {
     // Only remember a host we actually finished talking to.
     @net.append_line(
@@ -332,6 +388,84 @@ async fn handle_userauth(
 }
 
 ///|
+/// The terminal to ask the server for, or `None` for a session on pipes.
+///
+/// Without `-t` or `-T` this mirrors `ssh`: a shell started from a
+/// terminal gets one, a command or a redirected standard input does not.
+/// `-t` forces the request even with nothing local to measure, which is
+/// how `client -t host 'stty size'` is checked.
+fn wanted_pty(opts : ClientOptions) -> @connection.PtyParams? {
+  let asked = match opts.pty {
+    Some(explicit) => explicit
+    None => opts.command is None && @net.stdin_is_terminal()
+  }
+  guard asked else { return None }
+  let size = @net.terminal_size()
+  Some({
+    term: @net.terminal_type(),
+    cols: match size {
+      Some(s) => s.cols
+      None => DEFAULT_COLS
+    },
+    rows: match size {
+      Some(s) => s.rows
+      None => DEFAULT_ROWS
+    },
+    width_px: match size {
+      Some(s) => s.width_px
+      None => 0
+    },
+    height_px: match size {
+      Some(s) => s.height_px
+      None => 0
+    },
+    // No modes: the local terminal is raw, so the remote end should use
+    // its own defaults rather than be told to copy ours (docs/04 —
+    // the server accepts the string and ignores it either way).
+    modes: b"\x00",
+  })
+}
+
+///|
+/// Report every resize with `window-change`, so that a full-screen
+/// program on the other end redraws at the new size.
+///
+/// Polled rather than driven by SIGWINCH: see `WINCH_POLL_MS`.
+async fn watch_window_size(
+  c : @net.Conn,
+  s : @connection.ClientSession,
+) -> Unit {
+  let mut last = @net.terminal_size()
+  while !s.is_closed() {
+    @async.sleep(WINCH_POLL_MS)
+    let now = @net.terminal_size()
+    if now == last {
+      continue
+    }
+    // `last` only moves once the peer has actually been told. The channel
+    // is not running for the first two and a half round trips (open,
+    // pty-req, then the shell), and a resize in that window used to be
+    // recorded as the new `last` while `send_window_change` dropped it —
+    // after which every later poll compared equal and the remote program
+    // stayed at the size `pty-req` carried until the next resize.
+    guard now is Some(size) else { continue }
+    if !s.is_running() {
+      continue
+    }
+    last = now
+    s.send_window_change(
+      cols=size.cols,
+      rows=size.rows,
+      width_px=size.width_px,
+      height_px=size.height_px,
+    )
+    for out in s.take_outgoing() {
+      c.send(out[:])
+    }
+  }
+}
+
+///|
 /// Copy this process's standard input into the session until end of file,
 /// then tell the peer we are done sending.
 async fn pump_stdin(c : @net.Conn, s : @connection.ClientSession) -> Unit {
@@ -384,6 +518,13 @@ async fn run_session(
         @net.log(
           "toy-ssh client: the server refused the session (\{reason}): \{description}",
         )
+      // Not a protocol error: RFC 4254 section 6.2 lets a restricted or
+      // pty-starved server say no this way. Say what happened instead of
+      // accusing it of a violation on the wire.
+      PtyRefused =>
+        @net.log(
+          "toy-ssh client: the server would not give us a terminal; try -T for a session without one",
+        )
     }
   }
   for out in s.take_outgoing() {
@@ -401,13 +542,27 @@ fn parse_args(args : Array[String]) -> ClientOptions {
   let mut target : String? = None
   let mut command : String? = None
   let mut cipher : String? = None
+  let mut pty : Bool? = None
   let mut i = 1
   while i < args.length() {
     let flag = args[i]
+    // Everything after the host is the command, joined with spaces the
+    // way `ssh` does, whatever it looks like: `client host echo hello`
+    // works, and `client host -T` runs `-T` remotely rather than being
+    // read as our own flag.
+    if target is Some(_) {
+      let words = []
+      while i < args.length() {
+        words.push(args[i])
+        i = i + 1
+      }
+      command = Some(words.join(" "))
+      continue
+    }
     match flag {
       "--help" => {
         println(
-          "usage: client [-p PORT] [-i KEYFILE] [--known-hosts FILE] [--password PW] [--strict-host-key-checking] [-c CIPHER] [USER@]HOST [COMMAND]",
+          "usage: client [-p PORT] [-i KEYFILE] [--known-hosts FILE] [--password PW] [--strict-host-key-checking] [-c CIPHER] [-t] [-T] [USER@]HOST [COMMAND]",
         )
         @sys.exit(0)
       }
@@ -416,23 +571,22 @@ fn parse_args(args : Array[String]) -> ClientOptions {
         i = i + 1
         continue
       }
-      _ => ()
-    }
-    if !flag.has_prefix("-") {
-      if target is None {
-        target = Some(flag)
+      // Last one wins, so `-t -T` means `-T`, as with `ssh`.
+      "-t" => {
+        pty = Some(true)
         i = i + 1
         continue
       }
-      // Everything from here on is the command, joined with spaces the way
-      // `ssh` does, so `client host echo hello` works and a leading `-`
-      // inside the command is not mistaken for a flag.
-      let words = []
-      while i < args.length() {
-        words.push(args[i])
+      "-T" => {
+        pty = Some(false)
         i = i + 1
+        continue
       }
-      command = Some(words.join(" "))
+      _ => ()
+    }
+    if !flag.has_prefix("-") {
+      target = Some(flag)
+      i = i + 1
       continue
     }
     guard i + 1 < args.length() else { usage_error("\{flag} needs a value") }
@@ -467,6 +621,7 @@ fn parse_args(args : Array[String]) -> ClientOptions {
     strict,
     command,
     cipher,
+    pty,
   }
 }
 

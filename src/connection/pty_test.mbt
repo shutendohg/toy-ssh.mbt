@@ -279,3 +279,198 @@ test "a second pty-req on the same channel is refused" {
     fail("expected ShellRequest with a pty")
   }
 }
+
+// ---------------------------------------------------------------------------
+// Client side: asking for a terminal
+// ---------------------------------------------------------------------------
+
+///|
+fn test_pty_params() -> @connection.PtyParams {
+  {
+    term: "xterm-256color",
+    cols: 80,
+    rows: 24,
+    width_px: 0,
+    height_px: 0,
+    modes: test_modes(),
+  }
+}
+
+///|
+/// Drive the two halves until both are quiet, the way `pump` does in
+/// session_test.mbt.
+fn pty_pump(
+  c : @connection.ClientSession,
+  s : @connection.ServerSession,
+) -> (Array[@connection.ClientEvent], Array[@connection.ServerEvent]) raise {
+  let ce : Array[@connection.ClientEvent] = []
+  let se : Array[@connection.ServerEvent] = []
+  for _ in 0..<50 {
+    let from_c = c.take_outgoing()
+    let from_s = s.take_outgoing()
+    if from_c.is_empty() && from_s.is_empty() {
+      break
+    }
+    for p in from_c {
+      se.append(s.on_payload(p[:]))
+    }
+    for p in from_s {
+      ce.append(c.on_payload(p[:]))
+    }
+  }
+  (ce, se)
+}
+
+///|
+test "client pty: pty-req is asked for, then the shell runs on it" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_pty(test_pty_params())
+  c.request_shell()
+  let (_, se) = pty_pump(c, s)
+  guard se.length() == 2 else { fail("server events: \{se.length()}") }
+  guard se[0] is PtyRequest(term~, cols~, rows~, ..) else {
+    fail("expected PtyRequest first, got \{Repr(se[0])}")
+  }
+  inspect(term, content="xterm-256color")
+  inspect(cols, content="80")
+  inspect(rows, content="24")
+  guard se[1] is ShellRequest(pty~, ..) else {
+    fail("expected ShellRequest second, got \{Repr(se[1])}")
+  }
+  assert_true(pty)
+  assert_true(c.is_running())
+}
+
+///|
+/// The shell must not be asked for until the terminal is granted: a server
+/// that refuses the terminal would otherwise already be starting a shell
+/// on pipes, which is not what the user asked for.
+test "client pty: the shell waits for the pty-req reply" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_pty(test_pty_params())
+  c.request_shell()
+  for p in c.take_outgoing() {
+    ignore(s.on_payload(p[:]))
+  }
+  for p in s.take_outgoing() {
+    ignore(c.on_payload(p[:]))
+  }
+  let first = c.take_outgoing()
+  guard first.length() == 1 else {
+    fail("expected one message after the open, got \{first.length()}")
+  }
+  guard @connection.decode_channel_request(first[0][:]).request is PtyReq(..) else {
+    fail("expected pty-req alone")
+  }
+  assert_false(c.is_running())
+}
+
+///|
+/// A server refusing `pty-req` is exercising RFC 4254 section 6.2, not
+/// breaking the protocol: a restricted or pty-starved server says no this
+/// way. So the session ends, but as a refusal the caller can report — not
+/// as a framing error we would accuse the peer of on the wire.
+test "client pty: a refused terminal ends the session without blaming the peer" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_pty(test_pty_params())
+  c.request_shell()
+  for p in c.take_outgoing() {
+    ignore(s.on_payload(p[:]))
+  }
+  for p in s.take_outgoing() {
+    ignore(c.on_payload(p[:]))
+  }
+  ignore(c.take_outgoing())
+  let failed = @connection.encode_channel_failure(recipient_channel=0)
+  let ev = c.on_payload(failed[:])
+  guard ev.length() == 1 && ev[0] is PtyRefused else {
+    fail("expected PtyRefused, got \{ev.length()} event(s)")
+  }
+  assert_true(c.is_closed())
+  assert_false(c.is_running())
+}
+
+///|
+/// A CHANNEL_FAILURE for the `exec` or `shell` itself is still a hard
+/// error: we asked for the one thing the channel exists to do.
+test "client pty: a refused shell is still an error" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_shell()
+  for p in c.take_outgoing() {
+    ignore(s.on_payload(p[:]))
+  }
+  for p in s.take_outgoing() {
+    ignore(c.on_payload(p[:]))
+  }
+  ignore(c.take_outgoing())
+  let failed = @connection.encode_channel_failure(recipient_channel=0)
+  try c.on_payload(failed[:]) |> ignore catch {
+    ConnectionError(msg) => assert_true(msg.contains("shell"))
+  } noraise {
+    _ => fail("expected the refusal to raise")
+  }
+}
+
+///|
+test "client pty: window-change reaches the server" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_pty(test_pty_params())
+  c.request_shell()
+  ignore(pty_pump(c, s))
+  c.send_window_change(cols=100, rows=30, width_px=800, height_px=600)
+  let out = c.take_outgoing()
+  guard out.length() == 1 else { fail("expected one message") }
+  assert_eq(
+    out[0],
+    @connection.encode_window_change_request(
+      recipient_channel=0,
+      cols=100,
+      rows=30,
+      width_px=800,
+      height_px=600,
+    ),
+  )
+  let se = s.on_payload(out[0][:])
+  guard se.length() == 1 && se[0] is WindowChange(cols~, rows~, ..) else {
+    fail("expected WindowChange")
+  }
+  inspect(cols, content="100")
+  inspect(rows, content="30")
+}
+
+///|
+/// A plain `shell` must stay plain: nothing may slip a terminal into the
+/// path the non-PTY interop runs exercise.
+test "client pty: a plain shell asks for no terminal" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_shell()
+  let (_, se) = pty_pump(c, s)
+  guard se.length() == 1 && se[0] is ShellRequest(pty~, ..) else {
+    fail("expected one ShellRequest")
+  }
+  assert_false(pty)
+}
+
+///|
+/// `ssh -t host command` also runs on a terminal, so the terminal is not
+/// tied to `shell`: the request that follows it is whatever was asked for.
+test "client pty: exec can run on a terminal too" {
+  let c = @connection.ClientSession::new(window_size=1024, max_packet_size=256)
+  let s = @connection.ServerSession::new(window_size=1024, max_packet_size=256)
+  c.request_pty(test_pty_params())
+  c.request_exec("top -b -n 1")
+  let (_, se) = pty_pump(c, s)
+  guard se.length() == 2 else { fail("server events: \{se.length()}") }
+  guard se[0] is PtyRequest(..) else { fail("expected PtyRequest first") }
+  guard se[1] is ExecRequest(command~, ..) else {
+    fail("expected ExecRequest second, got \{Repr(se[1])}")
+  }
+  inspect(command, content="top -b -n 1")
+  assert_true(c.is_running())
+}
