@@ -308,6 +308,63 @@ server's own log line), `TERM=xterm-256color`, `stty size` reported `29 119` and
 `29 58` after the pane was resized, `exit 5` propagated, and the non-pty path returned
 `plain` with exit 4.
 
+### 3i. The client asking for a terminal
+
+The mirror of §3h: the toy **client** asks for `pty-req`, puts its own terminal into raw
+mode, and reports resizes. It needs a real terminal too, so it runs in a pane.
+
+Without `-t` or `-T` the client decides the way `ssh` does — a shell started from a terminal
+gets one, a command or a redirected standard input does not — so all three cases are worth
+running. The forced case is the one that fits in a script, because `-t` asks for a terminal
+even with nothing local to measure (it then reports 80x24):
+
+```
+client -p 2298 -i ./interop/client_ed25519 --known-hosts ./interop/ptyi_kh -t \
+    user@127.0.0.1 'tty; stty size; echo TERM=$TERM; exit 4' < /dev/null
+client -p 2298 … user@127.0.0.1 'tty; exit 5' < /dev/null      # no -t: pipes
+printf 'echo hi; exit 6\n' | client -p 2298 … -T user@127.0.0.1   # -T: pipes
+```
+
+Interactively (no command, from a pane), check the four things §3h checks, plus the two that
+only the client side has:
+
+5. Typing is echoed **once**. Twice means the local terminal is still cooked: raw mode
+   failed, and the remote end is echoing on top of the local line discipline.
+6. After the session ends, `stty -a` on the local shell shows `icanon isig echo` again. A
+   client that exits raw leaves the user with no echo and no line editing.
+
+Verified 2026-09-21 on macOS, both against the toy server (port 2298) and against
+OpenSSH_10.2p1 `sshd` (port 2200, `sshd -ddd -f interop/sshd_config`):
+
+- **Toy server.** `-t` with a pipe for standard input gave `/dev/ttys007`, `24 80`,
+  `TERM=xterm-256color`, exit 4; the same command without `-t` reported "not a tty" and
+  exit 5; `-T` with a piped `echo hi; exit 6` behaved as before. Interactively the shell
+  prompt appeared (it did not before this change — see the 2026-09-20 note below), `tty`
+  gave `/dev/ttys009`, `stty size` `28 119` and then `28 58` after the pane was resized,
+  arrow-key history worked, typing was echoed once, `exit 9` propagated, and the local
+  terminal came back with `icanon isig echo`.
+- **Real `sshd`.** It honoured the request: `SSH_TTY=/dev/ttys011`, `TERM=xterm-256color`,
+  `stty size` `24 80`, exit 8. Interactively `stty size` went from `28 58` to `28 28` when
+  the pane was resized, and `^C` interrupted a running `sleep 20`.
+
+Two more cases, added after the code review of the same change:
+
+- **A server that refuses the terminal.** Copy `interop/sshd_config` with `PermitTTY no` and
+  run the `-t` command against it. Expected: `the server would not give us a terminal; try
+  -T for a session without one`, and the disconnect `sshd` logs is **11**
+  (`BY_APPLICATION`), not 2 (`PROTOCOL_ERROR`) — refusing `pty-req` is RFC 4254 section 6.2,
+  not a protocol violation. Verified 2026-09-21 against OpenSSH_10.2p1.
+- **A flag after the host belongs to the remote command.** `client … user@host -T` must run
+  `-T` remotely (the toy server logs `exec "-T"`, and `sh` exits 2), while `client … -T
+  user@host` is still our own flag and opens a shell on pipes. Verified 2026-09-21.
+
+**`^C` interrupts a command on a real `sshd` but not on the toy server.** That is the toy
+server's documented limit, not the client's: its child is not a session leader with the pty
+as its controlling terminal (`docs/04`, "The child is not a session leader"), so the kernel
+has no foreground process group to signal. The client's part — raw mode, so that `^C`
+travels as a byte rather than killing the client — works against both, and the toy server
+echoes the `^C` back.
+
 ### 3d. Reading the debug output
 
 - `ssh -vvv`: look for `SSH2_MSG_KEXINIT`, `expecting SSH2_MSG_KEX_ECDH_REPLY`,

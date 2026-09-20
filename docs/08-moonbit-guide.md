@@ -350,3 +350,23 @@ Three things that each cost a debugging round:
    (1) applies. So `Child::wait` on a pty session waits for the process, *then* releases the
    slave, *then* joins the pump. That is the exact opposite of the pipe case, where the
    pumps are joined first so that no output is lost.
+
+### The client's own terminal (M5, client half)
+
+Three things that are not about the pty at all, but about the terminal the client is
+already sitting on:
+
+1. **There is no SIGWINCH.** `moonbitlang/async`'s `signal` package exposes only the
+   cancellation signals (SIGINT, SIGTERM, SIGHUP, SIGBREAK), so a resize has nowhere to
+   arrive. A C handler would not help on its own: it can do nothing async-signal-unsafe, so
+   it could only set a flag that MoonBit then has to poll — and the library says it may
+   change the signal mask, so the handler is not even guaranteed to run. Polling
+   `TIOCGWINSZ` on a timer is one ioctl and has neither problem.
+2. **A raw terminal does not turn `\n` into a carriage return and a line feed.**
+   `cfmakeraw` clears `ONLCR`, so every diagnostic written while the client mirrors a remote
+   terminal stair-steps down the screen unless it ends its lines with `\r\n`. `net.log` asks
+   `terminal_is_raw()` and picks the ending.
+3. **`@sys.exit` does not run `defer`.** A client that exits with the remote command's
+   status has to restore the terminal itself before calling it; the `defer` only covers the
+   paths that leave by raising. Getting this wrong leaves the user's shell with no echo,
+   which looks like the terminal broke rather than like a bug in the client.
