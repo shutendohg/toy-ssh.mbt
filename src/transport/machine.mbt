@@ -220,6 +220,15 @@ fn Transport::cipher_method(self : Transport) -> CipherMethod {
 }
 
 ///|
+/// What the KEXINIT exchange settled on, or `None` before the peer's
+/// KEXINIT has been seen. Exposed so a binary can report it: which suite
+/// a real peer actually falls back to is otherwise invisible, and it is
+/// the first thing you want to know when an interop run misbehaves.
+pub fn Transport::negotiated(self : Transport) -> Negotiated? {
+  self.negotiated
+}
+
+///|
 /// Whether strict kex was negotiated (both markers present). False until
 /// the peer's KEXINIT has been seen.
 pub fn Transport::strict_kex(self : Transport) -> Bool {

@@ -32,6 +32,25 @@ pub(all) struct Negotiated {
 } derive(Debug, Eq)
 
 ///|
+/// A one-line summary for diagnostics. The two directions are printed
+/// separately only when they differ, which for this toy means something
+/// has gone wrong: we require one suite both ways.
+pub fn Negotiated::summary(self : Negotiated) -> String {
+  let cipher = if self.cipher_client_to_server == self.cipher_server_to_client {
+    self.cipher_client_to_server
+  } else {
+    "\{self.cipher_client_to_server}/\{self.cipher_server_to_client}"
+  }
+  let mac = if self.mac_client_to_server == self.mac_server_to_client {
+    self.mac_client_to_server
+  } else {
+    "\{self.mac_client_to_server}/\{self.mac_server_to_client}"
+  }
+  let mac_part = if mac == "" { "" } else { " mac=\{mac}" }
+  "kex=\{self.kex} host-key=\{self.host_key} cipher=\{cipher}\{mac_part} strict-kex=\{self.strict_kex}"
+}
+
+///|
 /// Kex methods we can actually run (the strict-kex markers are excluded;
 /// they are pseudo-algorithms, RFC 4253 section 7.1 / docs/02 section 3).
 fn is_strict_marker(name : String) -> Bool {

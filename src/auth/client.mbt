@@ -11,9 +11,12 @@ pub(all) enum AuthEvent {
   Banner(String)
   /// Authenticated; the connection layer takes over.
   Success
-  /// A method was refused. `methods` is what the server says can continue
-  /// and `partial` its `partial_success` flag.
-  Failure(methods~ : Array[String], partial~ : Bool)
+  /// A method was refused. `refused` is the method the server was
+  /// answering — `none` for the opening probe, which is a question about
+  /// what the server accepts rather than a failed attempt. `methods` is
+  /// what the server says can continue and `partial` its
+  /// `partial_success` flag.
+  Failure(refused~ : String, methods~ : Array[String], partial~ : Bool)
   /// No method left to try (or one we cannot answer). The caller should
   /// disconnect.
   GiveUp(String)
@@ -165,7 +168,7 @@ fn AuthClient::dispatch(
           GiveUp("userauth: partial success is not supported by this client"),
         )
       } else {
-        events.push(Failure(methods~, partial~))
+        events.push(Failure(refused=self.refused_method(), methods~, partial~))
         ignore(self.advance_reporting(events))
       }
     }
@@ -191,6 +194,19 @@ fn AuthClient::dispatch(
         raise AuthError("USERAUTH_PK_OK: no publickey query outstanding")
       }
     other => raise AuthError("userauth: unexpected message \{other.to_int()}")
+  }
+}
+
+///|
+/// The method the outstanding request used, which is what a FAILURE is
+/// answering. Only the phases that have a request in flight can be seen
+/// here: `on_payload` returns early once we are done.
+fn AuthClient::refused_method(self : AuthClient) -> String {
+  match self.phase {
+    Probe => METHOD_NONE
+    PkQuery | PkSigned => METHOD_PUBLICKEY
+    PasswordSent => METHOD_PASSWORD
+    Authenticated | GaveUp => METHOD_NONE
   }
 }
 

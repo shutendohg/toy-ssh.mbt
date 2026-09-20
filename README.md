@@ -40,7 +40,9 @@ implemented either: forwarding works when a peer asks the **server** for it, whi
 - `publickey` and `password` authentication; unencrypted `openssh-key-v1` keys,
   `authorized_keys` and `known_hosts` (trust on first use, a changed key is always refused).
 - `exec` and `shell` on a session channel, with a pseudo-terminal when the peer asks for one
-  — so `ssh host` without `-T` gets a prompt, line editing and a matching `TERM`.
+  — so `ssh host` without `-T` gets a prompt, line editing and a matching `TERM`. The client
+  asks for one under the same rule: an interactive shell gets a terminal, `-t` and `-T` force
+  it either way, and resizes are passed on.
 - `direct-tcpip` forwarding on the server, **off** unless started with
   `--allow-tcp-forwarding`; with it on, an authenticated peer can make the server connect
   anywhere it can reach.

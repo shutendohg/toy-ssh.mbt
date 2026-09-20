@@ -940,3 +940,32 @@ test "a truncated blob reports a framing error, not a low-order point" {
     _ => fail("expected a ProtocolError")
   }
 }
+
+///|
+/// The summary a binary prints after the handshake. An AEAD suite has no
+/// separate MAC, so it says nothing about one rather than printing an
+/// empty name.
+test "negotiate: the summary names what a run actually settled on" {
+  let aead = @transport.negotiate(
+    Client,
+    @transport.KexInit::for_role(Client, cookie=cookie()),
+    @transport.KexInit::for_role(Server, cookie=cookie()),
+  )
+  inspect(
+    aead.summary(),
+    content="kex=mlkem768x25519-sha256 host-key=ssh-ed25519 cipher=chacha20-poly1305@openssh.com strict-kex=true",
+  )
+  let ctr = @transport.negotiate(
+    Client,
+    @transport.KexInit::for_role(
+      Client,
+      cookie=cookie(),
+      ciphers=Some([@transport.CIPHER_AES128_CTR]),
+    ),
+    @transport.KexInit::for_role(Server, cookie=cookie()),
+  )
+  inspect(
+    ctr.summary(),
+    content="kex=mlkem768x25519-sha256 host-key=ssh-ed25519 cipher=aes128-ctr mac=hmac-sha2-256 strict-kex=true",
+  )
+}

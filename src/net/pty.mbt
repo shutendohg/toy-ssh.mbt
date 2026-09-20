@@ -147,3 +147,158 @@ pub fn Pty::close(self : Pty) -> Unit {
   self.release_slave()
   self.master.close()
 }
+
+// ---------------------------------------------------------------------------
+// The local terminal (client side)
+// ---------------------------------------------------------------------------
+
+///|
+/// Room for a `struct termios`, which is 60 bytes on both platforms we
+/// build for. The C side checks the length rather than trusting it.
+const TERMIOS_MAX : Int = 128
+
+///|
+/// Standard input. A client asks for a remote terminal only when its own
+/// is one, so this is the descriptor it reports the size of and puts into
+/// raw mode.
+const STDIN_FD : Int = 0
+
+///|
+/// Standard error, where diagnostics go. Raw mode is a property of the
+/// terminal, so whether a diagnostic needs a carriage return depends on
+/// whether it lands on that same terminal rather than in a file.
+const STDERR_FD : Int = 2
+
+///|
+/// How many numbers `terminal_size` asks the kernel for.
+const WINSIZE_FIELDS : Int = 4
+
+///|
+extern "C" fn isatty_ffi(fd : Int) -> Int = "toy_ssh_isatty"
+
+///|
+#borrow(out)
+extern "C" fn get_winsize_ffi(
+  fd : Int,
+  out : FixedArray[Int],
+  out_len : Int,
+) -> Int = "toy_ssh_get_winsize"
+
+///|
+#borrow(saved)
+extern "C" fn term_raw_ffi(
+  fd : Int,
+  saved : FixedArray[Byte],
+  saved_len : Int,
+) -> Int = "toy_ssh_term_raw"
+
+///|
+#borrow(saved)
+extern "C" fn term_restore_ffi(
+  fd : Int,
+  saved : FixedArray[Byte],
+  saved_len : Int,
+) -> Int = "toy_ssh_term_restore"
+
+///|
+/// A terminal's size in characters and, when the terminal reports them,
+/// pixels. `pty-req` and `window-change` carry exactly these four.
+pub struct WindowSize {
+  cols : UInt
+  rows : UInt
+  width_px : UInt
+  height_px : UInt
+} derive(Eq, Debug)
+
+///|
+/// True when this process's standard input is a terminal. A client
+/// without one has nothing to put into raw mode and no size to report, so
+/// it asks for no remote terminal either.
+pub fn stdin_is_terminal() -> Bool {
+  // POSIX says non-zero, not 1.
+  isatty_ffi(STDIN_FD) != 0
+}
+
+///|
+/// The terminal type to report, from `TERM`. `vt100` is the fallback the
+/// RFC's own example uses; sending an empty string makes remote programs
+/// fail in ways that look like our bug.
+pub fn terminal_type() -> String {
+  match @env.get_env_var("TERM") {
+    Some(term) if term != "" => term
+    _ => "vt100"
+  }
+}
+
+///|
+/// The size of this process's terminal, or `None` when it has none, the
+/// kernel will not say, or the terminal has never been sized (which it
+/// reports as zero by zero -- see the C side).
+pub fn terminal_size() -> WindowSize? {
+  let out = FixedArray::make(WINSIZE_FIELDS, 0)
+  if get_winsize_ffi(STDIN_FD, out, WINSIZE_FIELDS) != 0 {
+    return None
+  }
+  Some({
+    cols: out[0].reinterpret_as_uint(),
+    rows: out[1].reinterpret_as_uint(),
+    width_px: out[2].reinterpret_as_uint(),
+    height_px: out[3].reinterpret_as_uint(),
+  })
+}
+
+///|
+/// The saved settings of a terminal that is currently in raw mode.
+/// `restore` puts them back and is safe to call more than once, because
+/// every exit path has to go through it — a client that dies with the
+/// terminal still raw leaves the user with no echo.
+pub struct RawTerminal {
+  saved : FixedArray[Byte]
+  mut raw : Bool
+}
+
+///|
+/// True while `enter_raw_mode` is in effect. Process-wide because it is a
+/// property of the terminal, not of any one handle on it: `log` reads it
+/// to end its lines the way a raw terminal needs.
+let raw_mode : Ref[Bool] = Ref(false)
+
+///|
+/// Whether this process's terminal is currently in raw mode.
+pub fn terminal_is_raw() -> Bool {
+  raw_mode.val
+}
+
+///|
+/// Whether a diagnostic line needs a carriage return as well as a line
+/// feed: only when it lands on the very terminal that is in raw mode.
+/// Redirect standard error to a file and the raw flag says nothing about
+/// it, so the file would collect a stray CR on every line.
+pub fn log_needs_crlf() -> Bool {
+  raw_mode.val && isatty_ffi(STDERR_FD) != 0
+}
+
+///|
+/// Put this process's terminal into raw mode, so that echo, line editing
+/// and the signal characters all become the remote end's business and
+/// `^C` travels as a byte. `None` when there is no terminal or the
+/// settings could not be changed.
+pub fn enter_raw_mode() -> RawTerminal? {
+  let saved = FixedArray::make(TERMIOS_MAX, b'\x00')
+  if term_raw_ffi(STDIN_FD, saved, TERMIOS_MAX) != 0 {
+    return None
+  }
+  raw_mode.val = true
+  Some({ saved, raw: true, })
+}
+
+///|
+/// Put the terminal back the way it was. Does nothing after the first
+/// call.
+pub fn RawTerminal::restore(self : RawTerminal) -> Unit {
+  if self.raw {
+    self.raw = false
+    raw_mode.val = false
+    ignore(term_restore_ffi(STDIN_FD, self.saved, TERMIOS_MAX))
+  }
+}

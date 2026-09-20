@@ -310,7 +310,24 @@ pub(all) enum ClientEvent {
   Closed
   /// The server refused to open the channel.
   OpenFailed(reason~ : UInt, description~ : String)
+  /// The server refused the terminal we asked for. RFC 4254 section 6.2
+  /// lets it: a restricted or pty-starved server says no this way, so it
+  /// is a refusal to report rather than a protocol error to blame it for.
+  /// The session is over either way — the command was never requested.
+  PtyRefused
 } derive(Debug, Eq)
+
+///|
+/// What a client asks for in `pty-req` (RFC 4254 section 6.2): the terminal
+/// type, its size, and the encoded terminal modes.
+pub(all) struct PtyParams {
+  term : String
+  cols : UInt
+  rows : UInt
+  width_px : UInt
+  height_px : UInt
+  modes : Bytes
+}
 
 ///|
 /// The client half: opens one `session`, asks for `exec` or `shell`, feeds
@@ -321,10 +338,17 @@ pub struct ClientSession {
   queue : Array[Pending]
   /// The request to send once the channel is open.
   mut want : ChannelRequestKind?
+  /// The terminal to ask for before `want`, when the caller wants one.
+  mut pty : PtyParams?
+  /// True between sending `pty-req` and its reply: the next CHANNEL_SUCCESS
+  /// or CHANNEL_FAILURE is about the terminal, not about the shell.
+  mut pty_pending : Bool
   mut request_sent : Bool
   mut running : Bool
   mut exit_status : UInt?
   mut open_failed : Bool
+  /// The server refused a request we cannot continue without.
+  mut request_failed : Bool
 }
 
 ///|
@@ -338,10 +362,13 @@ pub fn ClientSession::new(
     outgoing: [],
     queue: [],
     want: None,
+    pty: None,
+    pty_pending: false,
     request_sent: false,
     running: false,
     exit_status: None,
     open_failed: false,
+    request_failed: false,
   }
 }
 
@@ -382,7 +409,7 @@ pub fn ClientSession::is_running(self : ClientSession) -> Bool {
 
 ///|
 pub fn ClientSession::is_closed(self : ClientSession) -> Bool {
-  self.ch.is_closed() || self.open_failed
+  self.ch.is_closed() || self.open_failed || self.request_failed
 }
 
 ///|
@@ -398,6 +425,73 @@ pub fn ClientSession::request_exec(
 /// Open the channel and start the server's login shell.
 pub fn ClientSession::request_shell(self : ClientSession) -> Unit {
   self.start(Shell)
+}
+
+///|
+/// Ask for a terminal for the session, before asking for what runs on it.
+/// `request_exec` or `request_shell` still has to follow: the command is
+/// not requested until the server grants the terminal, because a command
+/// started on pipes is not what the caller asked for, and by then the
+/// caller's own standard input is already in raw mode.
+pub fn ClientSession::request_pty(
+  self : ClientSession,
+  pty : PtyParams,
+) -> Unit {
+  guard self.want is None else {
+    abort("ClientSession: the pty must be asked for before the command")
+  }
+  self.pty = Some(pty)
+}
+
+///|
+/// Tell the peer the terminal was resized. Queued in the priority lane,
+/// not behind standard input: a resize that waits for window credit
+/// arrives after the program has already redrawn at the old size.
+///
+/// Ignored before the shell is running and after the channel is gone;
+/// there is no terminal to resize in either case.
+pub fn ClientSession::send_window_change(
+  self : ClientSession,
+  cols~ : UInt,
+  rows~ : UInt,
+  width_px~ : UInt,
+  height_px~ : UInt,
+) -> Unit {
+  guard self.running && self.pty is Some(_) else { return }
+  self.outgoing.push(
+    encode_window_change_request(
+      recipient_channel=self.ch.remote_channel,
+      cols~,
+      rows~,
+      width_px~,
+      height_px~,
+    ),
+  )
+}
+
+///|
+/// Queue the `exec` or `shell` request itself. Called either straight
+/// after the channel opens, or after the terminal was granted.
+fn ClientSession::send_want(
+  self : ClientSession,
+  want : ChannelRequestKind,
+) -> Unit {
+  self.outgoing.push(
+    match want {
+      Exec(command) =>
+        encode_exec_request(
+          recipient_channel=self.ch.remote_channel,
+          command~,
+          want_reply=true,
+        )
+      Shell =>
+        encode_shell_request(
+          recipient_channel=self.ch.remote_channel,
+          want_reply=true,
+        )
+      _ => abort("ClientSession: unsupported request")
+    },
+  )
 }
 
 ///|
@@ -470,22 +564,23 @@ pub fn ClientSession::on_payload(
         raise ConnectionError("CHANNEL_OPEN_CONFIRMATION: channel already open")
       }
       self.request_sent = true
-      self.outgoing.push(
-        match want {
-          Exec(command) =>
-            encode_exec_request(
-              recipient_channel=self.ch.remote_channel,
-              command~,
-              want_reply=true,
-            )
-          Shell =>
-            encode_shell_request(
-              recipient_channel=self.ch.remote_channel,
-              want_reply=true,
-            )
-          _ => abort("ClientSession: unsupported request")
-        },
-      )
+      if self.pty is Some(pty) {
+        self.pty_pending = true
+        self.outgoing.push(
+          encode_pty_request(
+            recipient_channel=self.ch.remote_channel,
+            term=pty.term,
+            cols=pty.cols,
+            rows=pty.rows,
+            width_px=pty.width_px,
+            height_px=pty.height_px,
+            modes=pty.modes,
+            want_reply=true,
+          ),
+        )
+        return events
+      }
+      self.send_want(want)
     }
     SSH_MSG_CHANNEL_OPEN_FAILURE => {
       let (recipient, reason, description) = decode_channel_open_failure(
@@ -501,7 +596,16 @@ pub fn ClientSession::on_payload(
         decode_channel_success(payload),
         "CHANNEL_SUCCESS",
       )
-      self.running = true
+      if self.pty_pending {
+        // The terminal is ours; now ask for what runs on it.
+        self.pty_pending = false
+        guard self.want is Some(want) else {
+          raise ConnectionError("CHANNEL_SUCCESS: nothing was requested")
+        }
+        self.send_want(want)
+      } else {
+        self.running = true
+      }
     }
     SSH_MSG_CHANNEL_FAILURE => {
       check_open_channel(
@@ -509,6 +613,12 @@ pub fn ClientSession::on_payload(
         decode_channel_failure(payload),
         "CHANNEL_FAILURE",
       )
+      if self.pty_pending {
+        self.pty_pending = false
+        self.request_failed = true
+        events.push(PtyRefused)
+        return events
+      }
       raise ConnectionError("the server refused the exec or shell request")
     }
     SSH_MSG_CHANNEL_DATA => {

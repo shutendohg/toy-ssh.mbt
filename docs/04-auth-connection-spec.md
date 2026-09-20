@@ -149,7 +149,8 @@ progress.
 
 ## Part B — Connection protocol (RFC 4254)
 
-Only the `session` channel type is supported, carrying `exec` and a non-PTY `shell`.
+Only the `session` channel type is supported, carrying `exec` and `shell`. The server runs
+either on a PTY (when the peer asks) or on plain pipes, and our client asks for either.
 
 ### Message numbers
 
@@ -218,11 +219,11 @@ Server replies `SSH_MSG_CHANNEL_SUCCESS (99)` or `SSH_MSG_CHANNEL_FAILURE (100)`
 `want_reply`. On success the server spawns the process (exec: run `command` via the shell;
 shell: run the login shell without a PTY) and pipes stdio.
 
-**PTY (`pty-req`) is out of scope** — if the client sends `pty-req` (our client won't), the
-server replies `CHANNEL_FAILURE`. Document that OpenSSH `ssh` allocates a PTY by default for
-interactive shells, so **to test toy-server shell with OpenSSH the user must pass `ssh -T`**
-(disable PTY). For `exec` (`ssh host command`), OpenSSH does not request a PTY by default, so
-that path is clean.
+**PTY (`pty-req`)**: the server honours it — see [`pty-req` and `window-change`](#pty-req-and-window-change-m5)
+below, and our client sends one under the same rule OpenSSH uses: a shell started from a
+terminal gets one, a command or a redirected standard input does not, and `-t` / `-T` force
+the decision either way. OpenSSH `ssh` behaves the same, so `ssh -T` selects the non-PTY
+shell explicitly and `ssh host command` never asks.
 
 ### Data flow & flow control
 
@@ -296,7 +297,8 @@ Track per channel: local id, remote id, send window (peer→me credit I hold), r
 "Simple shell" = spawn the user's shell (`$SHELL` or `/bin/sh`) with no PTY, wire
 stdin/stdout/stderr to the channel, and report its exit code. No line editing, no job
 control, no terminal modes. This is enough to run `ssh -T toyserver` and type commands, and to
-run `ssh toyserver 'uname -a'` via exec. Process spawning uses `moonbitlang/async`'s
+run `ssh toyserver 'uname -a'` via exec. A peer that asks for a terminal first gets the PTY
+path instead. Process spawning uses `moonbitlang/async`'s
 `process` package (see [08](08-moonbit-guide.md)).
 
 ### `direct-tcpip` port forwarding (M5, server side)
@@ -386,3 +388,32 @@ What we do:
 
 The ordering around the pty's own descriptors is the part that is easy to get wrong, and it
 is recorded in [08-moonbit-guide.md](08-moonbit-guide.md).
+
+#### The client's half
+
+Asking for a terminal is what makes an interactive session work at all: a shell decides
+whether it is interactive from `isatty`, so without `pty-req` it starts, reads its input as
+a script and prints no prompt.
+
+- **`pty-req` goes out before `exec` or `shell`, and the command is not requested until the
+  server has granted it.** A `CHANNEL_FAILURE` for the terminal ends the connection rather
+  than falling back to pipes: the local terminal is already raw by then, and a session that
+  silently is not what was asked for is worse than one that stops.
+- **The local terminal goes into raw mode** (`cfmakeraw`) for the life of the session, so
+  echo, line editing and the signal characters all belong to the remote end and `^C`
+  travels as a byte. Every path out of the client puts the settings back; a client that
+  exits raw leaves the user's shell with no echo.
+- **Resizes are polled, not signalled.** `moonbitlang/async` routes only the cancellation
+  signals, so SIGWINCH has nowhere to arrive; a C handler would still have to be polled to
+  reach async code, and the runtime reserves the right to change the signal mask. The
+  client re-reads `TIOCGWINSZ` five times a second and sends `window-change` when it moved.
+  `window-change` goes out ahead of queued standard input, because a resize that waits for
+  window credit arrives after the program has already redrawn at the old size.
+- **The modes string is empty** (`TTY_OP_END` alone). Our terminal is raw, so telling the
+  remote end to copy that would turn its echo and line editing off — exactly what we want
+  it to be doing.
+- **A raw terminal has no local way out.** `^C`, `^\` and `^Z` all travel as bytes, and we
+  have neither OpenSSH's `~.` escape sequence nor a keepalive, so a peer that stops
+  answering after the shell starts hangs the session until it is killed from another
+  terminal. Left as a toy limitation: an escape sequence means scanning the input stream
+  for it, which is a second state machine on the hot path. `-T` avoids it entirely.
